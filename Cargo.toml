@@ -1,0 +1,19 @@
+[package]
+name = "plannr"
+version = "0.1.0"
+edition = "2024"
+default-run = "cli"
+
+[dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.41", features = ["derive"] }
+cli-table = { version = "0.5.0", default-features = false, features = ["derive", "title"] }
+dotenv = "0.15.0"
+serde = { version = "1.0.219", features = ["derive"] }
+sqlx = { version = "0.8.6", features = ["derive", "runtime-tokio", "sqlite", "time"] }
+time = { version = "0.3.41", features = ["serde"] }
+tokio = { version = "1.46.1", features = ["full", "macros"] }
+xilem = { version = "0.3.0", path = "../../contrib/xilem/xilem" }
+
+[profile.dev.package."*"]
+opt-level = 2
