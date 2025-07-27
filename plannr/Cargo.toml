@@ -1,0 +1,24 @@
+[package]
+name = "plannr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+oauth2 = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+camino = { workspace = true }
+cli-table = { workspace = true, features = ["derive", "title"] }
+serde = { workspace = true, features = ["derive"] }
+sqlx = { workspace = true, features = [
+    "derive",
+    "runtime-tokio",
+    "sqlite",
+    "time",
+] }
+thiserror = { workspace = true }
+time = { workspace = true, features = ["serde"] }
+tokio = { workspace = true, features = ["full", "macros"] }
+xilem = { workspace = true, path = "../../../contrib/xilem/xilem" }

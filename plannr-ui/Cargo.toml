@@ -1,0 +1,13 @@
+[package]
+name = "plannr-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+plannr = { path = "../plannr" }
+
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+xilem = { workspace = true }
+dotenv = { workspace = true }
+tokio = { workspace = true }

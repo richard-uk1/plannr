@@ -12,4 +12,10 @@ CREATE TABLE events (
     end_time INTEGER NOT NULL,
     -- When true time is truncated from start/end_time
     date_only BOOLEAN NOT NULL
-)
+);
+
+CREATE TABLE google_oauth (
+    id INTEGER PRIMARY KEY,
+    user TEXT NOT NULL,
+    token TEXT NOT NULL
+);

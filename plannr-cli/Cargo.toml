@@ -1,0 +1,20 @@
+[package]
+name = "plannr-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+plannr = { path = "../plannr" }
+
+anyhow = { workspace = true }
+camino = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+cli-table = { workspace = true }
+dotenv = { workspace = true }
+oauth2 = { workspace = true }
+reqwest = { workspace = true }
+sqlx = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
