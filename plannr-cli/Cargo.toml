@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 plannr = { path = "../plannr" }
+icalendar = { path = "../icalendar" }
 
 anyhow = { workspace = true }
 camino = { workspace = true }

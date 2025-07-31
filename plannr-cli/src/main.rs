@@ -1,6 +1,4 @@
-use std::env;
-
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use camino::Utf8Path;
 use clap::Parser;
 use cli_table::{WithTitle, print_stdout};
@@ -10,14 +8,13 @@ use oauth2::{
     StandardTokenResponse, TokenResponse, TokenUrl,
     basic::{BasicClient, BasicTokenType},
 };
-use plannr::{data::EventInterval, db, google_creds::GoogleCreds};
+use plannr::{data::EventInterval, db, env_var, google_creds::GoogleCreds};
 use reqwest::{Url, redirect::Policy};
 use sqlx::{SqliteConnection, SqlitePool, query};
 use time::{
     Date, Month, UtcDateTime, format_description::BorrowedFormatItem, macros::format_description,
 };
 use tokio::{
-    fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufStream},
     net::TcpListener,
 };
@@ -95,7 +92,7 @@ async fn main() -> Result<()> {
 }
 
 async fn clear_database() -> Result<()> {
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    let pool = SqlitePool::connect(&env_var("DATABASE_URL")?).await?;
     let mut conn = pool.acquire().await?;
     query!("DELETE FROM events").execute(&mut *conn).await?;
     query!("DELETE FROM calendars").execute(&mut *conn).await?;
@@ -107,7 +104,7 @@ async fn init_fixtures(reset_database: bool) -> Result<()> {
         // could share pool but who cares its fast anyway
         clear_database().await?;
     }
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    let pool = SqlitePool::connect(&env_var("DATABASE_URL")?).await?;
     let mut conn = pool.acquire().await?;
     let fst_calendar = db::new_calendar("first test calendar", &mut *conn).await?;
     let snd_calendar = db::new_calendar("second test calendar", &mut *conn).await?;
@@ -140,7 +137,7 @@ async fn init_fixtures(reset_database: bool) -> Result<()> {
 }
 
 async fn create_calendar(name: String) -> Result<()> {
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    let pool = SqlitePool::connect(&env_var("DATABASE_URL")?).await?;
     let mut conn = pool.acquire().await?;
     let calendar = db::new_calendar(&name, &mut *conn).await?;
     print_stdout(vec![calendar].with_title())?;
@@ -148,7 +145,7 @@ async fn create_calendar(name: String) -> Result<()> {
 }
 
 async fn list_calendars() -> Result<()> {
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    let pool = SqlitePool::connect(&env_var("DATABASE_URL")?).await?;
     let mut conn = pool.acquire().await?;
     let calendars = db::get_calendars(&mut *conn).await?;
     print_stdout(calendars.with_title())?;
@@ -156,7 +153,7 @@ async fn list_calendars() -> Result<()> {
 }
 
 async fn list_events(calendar_id: Option<i64>, calendar: Option<&str>) -> Result<()> {
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    let pool = SqlitePool::connect(&env_var("DATABASE_URL")?).await?;
     let mut conn = pool.acquire().await?;
     let calendar_id = match (calendar_id, calendar) {
         (None, None) => None,
@@ -198,7 +195,7 @@ async fn create_event(
         let end = UtcDateTime::parse(&end_time, datetime_desc)?;
         EventInterval::new_datetime(start, end)
     }?;
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    let pool = SqlitePool::connect(&env_var("DATABASE_URL")?).await?;
     let mut conn = pool.acquire().await?;
     let calendar = db::new_event(calendar_id, &label, interval, &mut *conn).await?;
     print_stdout(vec![calendar].with_title())?;
@@ -206,7 +203,7 @@ async fn create_event(
 }
 
 async fn display_google_events() -> Result<()> {
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    let pool = SqlitePool::connect(&env_var("DATABASE_URL")?).await?;
     let mut conn = pool.acquire().await?;
     let http_client = reqwest::ClientBuilder::new()
         // Following redirects opens the client up to SSRF vulnerabilities.
@@ -216,15 +213,37 @@ async fn display_google_events() -> Result<()> {
 
     let google_oauth_tok = google_oauth_token(&http_client, &mut *conn).await?;
 
-    let calendar_id = env::var("GOOGLE_USERNAME")?;
+    let calendar_id = env_var("GOOGLE_USERNAME")?;
     let address = format!("https://apidata.googleusercontent.com/caldav/v2/{calendar_id}/events");
 
     let req = http_client
         .get(Url::parse(&address).unwrap())
         .bearer_auth(google_oauth_tok.access_token().secret());
-    let res_head = req.send().await?;
+    let mut res_head = req.send().await?;
+    if res_head.status().is_client_error() {
+        tracing::error!("google oauth2 failure: {}", res_head.text().await?);
+        // assume all errors are expired token
+        let google_oauth = google_oauth_client(Utf8Path::new("google_creds.json"))?;
+        let Some(refresh_token) = google_oauth_tok.refresh_token() else {
+            bail!("no refresh token");
+        };
+        let token = google_oauth
+            .exchange_refresh_token(refresh_token)
+            .request_async(&http_client)
+            .await?;
+
+        db::store_google_token(&env_var("GOOGLE_USERNAME")?, token.clone(), &mut *conn).await?;
+        let req = http_client
+            .get(Url::parse(&address).unwrap())
+            .bearer_auth(token.access_token().secret());
+        res_head = req.send().await?;
+    }
+    dbg!(&res_head);
     let calendar = res_head.text().await?;
-    fs::write("calendar.txt", &calendar).await?;
+    dbg!(&calendar);
+
+    let calendar = icalendar::parse(&calendar)?;
+    dbg!(calendar);
     Ok(())
 }
 
@@ -268,6 +287,7 @@ async fn google_oauth_token(
 
     let (code, state) = {
         // A very naive implementation of the redirect server.
+        // Returns an error in browser but we get the auth token so all good.
         let listener = TcpListener::bind("127.0.0.1:8080").await?;
 
         // The server will terminate itself after collecting the first code.
@@ -316,7 +336,7 @@ async fn google_oauth_token(
         .request_async(http_client)
         .await?;
 
-    db::store_google_token(&env::var("GOOGLE_USERNAME")?, token.clone(), exec).await?;
+    db::store_google_token(&env_var("GOOGLE_USERNAME")?, token.clone(), exec).await?;
     Ok(token)
 }
 
