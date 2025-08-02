@@ -1,82 +1,15 @@
 //! Turns text input into lines
 
-use std::{borrow::Cow, str::Chars};
+use core::fmt;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail};
 
 use crate::line_iter::LineIter;
-
-#[derive(Debug)]
-pub enum ICalLine {
-    Begin(String),
-    End(String),
-    ProdID(String),
-    Version(String),
-    CalScale(String),
-    Tzid(String),
-    TzOffsetFrom(String),
-    TzOffsetTo(String),
-    TzName(String),
-    DtStart(String),
-    DtEnd(String),
-    RRule(String),
-    /// An unrecognised extension
-    Extension {
-        name: String,
-        value: String,
-    },
-}
-
-impl<'src> TryFrom<&'src str> for ICalLine {
-    type Error = anyhow::Error;
-    fn try_from(input: &'src str) -> Result<Self, Self::Error> {
-        let line = parse_line(input)?;
-        let Name::Iana(key) = line.name else {
-            todo!("extensions");
-        };
-        if key.eq_ignore_ascii_case("BEGIN") {
-            Ok(ICalLine::Begin(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("END") {
-            Ok(ICalLine::End(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("PRODID") {
-            Ok(ICalLine::ProdID(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("VERSION") {
-            Ok(ICalLine::Version(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("CALSCALE") {
-            Ok(ICalLine::CalScale(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("TZID") {
-            Ok(ICalLine::Tzid(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("TZOFFSETFROM") {
-            Ok(ICalLine::TzOffsetFrom(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("TZOFFSETTO") {
-            Ok(ICalLine::TzOffsetTo(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("TZNAME") {
-            Ok(ICalLine::TzName(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("DTSTART") {
-            Ok(ICalLine::DtStart(line.value.to_owned()))
-        } else if key.eq_ignore_ascii_case("RRULE") {
-            Ok(ICalLine::RRule(line.value.to_owned()))
-        } else if key.starts_with("X-") {
-            // TODO should we be case-insensitive here?
-            Ok(ICalLine::Extension {
-                name: key.to_owned(),
-                value: line.value.to_owned(),
-            })
-        } else {
-            bail!("unexpected iCal key `{key}`")
-        }
-    }
-}
 
 pub fn print_lines(input: &str) {
     for line in LineIter::new(input) {
         println!("{:#?}", parse_line(&*line).unwrap());
     }
-}
-
-/// Parse the next line off the input
-pub fn line_iter(input: &str) -> impl Iterator<Item = anyhow::Result<ICalLine>> {
-    LineIter::new(input).map(|line| ICalLine::try_from(&*line))
 }
 
 #[derive(Debug, PartialEq)]
@@ -88,12 +21,11 @@ struct Line<'src> {
 
 fn parse_line<'src>(input: &'src str) -> anyhow::Result<Line<'src>> {
     // no escaping in name so easier to parse
-    let mut name_iter = input.splitn(2, ":");
     let Some((prefix, value)) = input.split_once(':') else {
         bail!("malformed icalendar line: {}", input);
     };
     let Some((name, params_str)) = prefix.split_once(';') else {
-        let name = parse_name(prefix)?;
+        let name = Name::parse(prefix)?;
         return Ok(Line {
             name,
             params: vec![],
@@ -101,14 +33,14 @@ fn parse_line<'src>(input: &'src str) -> anyhow::Result<Line<'src>> {
         });
     };
 
-    let name = parse_name(name)?;
+    let name = Name::parse(name)?;
 
     let mut params = vec![];
     let mut loop_rest = params_str;
     while !loop_rest.is_empty() {
         // slightly inefficient to look ahead for ';' I think but much simpler and easier to program.
         let (first_param, rest) = split_once_outside_quotes(';', loop_rest);
-        params.push(parse_param(first_param)?);
+        params.push(Param::parse(first_param)?);
         loop_rest = rest;
     }
     Ok(Line {
@@ -119,92 +51,170 @@ fn parse_line<'src>(input: &'src str) -> anyhow::Result<Line<'src>> {
 }
 
 #[derive(Debug, PartialEq)]
-struct Param<'src> {
-    name: Name<'src>,
-    // values are comma-separated list
-    values: Vec<&'src str>,
+pub struct Param<'src> {
+    pub name: Name<'src>,
+    // values are comma-separated list, at least one
+    pub first_value: &'src str,
+    pub rest_values: Vec<&'src str>,
 }
 
-fn parse_param(input: &str) -> anyhow::Result<Param<'_>> {
-    let Some((name, rest)) = input.split_once('=') else {
-        bail!("invalid parameter `{input}`: no '='");
-    };
+impl<'src> Param<'src> {
+    fn parse(input: &'src str) -> anyhow::Result<Param<'src>> {
+        let Some((name, rest)) = input.split_once('=') else {
+            bail!("invalid parameter `{input}`: no '='");
+        };
 
-    let name = parse_name(name)?;
-    let mut values = vec![];
-    let mut rest_loop = rest;
-    while !rest_loop.is_empty() {
-        let (next_param, rest) = split_once_outside_quotes(',', rest_loop);
-        // we're pretty lax here but it will work on well-formed input and not do anything too stupid
-        // on malformed input
-        values.push(next_param.trim_matches('"'));
-        rest_loop = rest;
+        let name = Name::parse(name)?;
+        let (first_value, rest) = split_once_outside_quotes(',', rest);
+        let first_value = param_value(first_value)?;
+
+        let mut rest_loop = rest;
+        let mut rest_values = vec![];
+        while !rest_loop.is_empty() {
+            let (next_param, rest) = split_once_outside_quotes(',', rest_loop);
+            // we're pretty lax here but it will work on well-formed input and not do anything too stupid
+            // on malformed input
+
+            rest_values.push(param_value(next_param)?);
+            rest_loop = rest;
+        }
+        Ok(Param {
+            name,
+            first_value,
+            rest_values,
+        })
     }
-    Ok(Param { name, values })
 }
 
 #[derive(Debug, PartialEq)]
-enum Name<'src> {
+pub enum Name<'src> {
     XName(XName<'src>),
     Iana(&'src str),
 }
 
-fn parse_name<'src>(input: &'src str) -> anyhow::Result<Name<'src>> {
-    let mut chars = input.chars();
-    if matches!(chars.next(), Some('X')) && matches!(chars.next(), Some('-')) {
-        let x_name = parse_x_name(&input[2..]);
-        Ok(Name::XName(x_name))
-    } else {
-        // check skipped for speed
-        //parse_iana_token(input)
-        Ok(Name::Iana(input))
+impl fmt::Display for Name<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Name::XName(xname) => fmt::Display::fmt(xname, f),
+            Name::Iana(iana) => fmt::Display::fmt(iana, f),
+        }
+    }
+}
+
+impl<'src> Name<'src> {
+    pub fn parse(input: &'src str) -> anyhow::Result<Self> {
+        let mut chars = input.chars();
+        if matches!(chars.next(), Some('X')) && matches!(chars.next(), Some('-')) {
+            let x_name = XName::parse(chars.as_str())?;
+            Ok(Name::XName(x_name))
+        } else {
+            Ok(Name::Iana(iana_token(input)?))
+        }
     }
 }
 
 #[derive(Debug, PartialEq)]
-struct XName<'src> {
+pub struct XName<'src> {
     /// 3-character ascii alphanumeric
-    vendor: Option<[u8; 3]>,
-    value: &'src str,
+    pub vendor: Option<[u8; 3]>,
+    pub value: &'src str,
 }
 
-/// Currently we don't check that the value (after the vendor ID) satisfies `[0-9a-zA-z-]*`
-fn parse_x_name<'src>(input: &'src str) -> XName<'src> {
-    let mut chars = input.chars();
-    if matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-        && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-        && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-        && matches!(chars.next(), Some('-'))
-    {
-        // Panic: input has at at least 4 bytes so no out-of-bounds possible
-        let bytes = input.as_bytes();
-        let vendor = [bytes[0], bytes[1], bytes[2]];
-        XName {
-            vendor: Some(vendor),
-            value: chars.as_str(),
+impl fmt::Display for XName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn c(input: u8) -> char {
+            // Unwrap: cannot fail as vendor is alphanumeric
+            char::from_u32(input.into()).unwrap()
         }
-    } else {
-        XName {
-            vendor: None,
-            value: input,
+        write!(f, "X-")?;
+        if let Some(vendor) = &self.vendor {
+            write!(f, "{}{}{}-", c(vendor[0]), c(vendor[1]), c(vendor[2]))?;
+        }
+        // value is alphanumeric or '-'
+        fmt::Display::fmt(self.value, f)
+    }
+}
+
+impl<'src> XName<'src> {
+    /// Currently we don't check that the value (after the vendor ID) satisfies `[0-9a-zA-z-]*`
+    fn parse(input: &'src str) -> anyhow::Result<XName<'src>> {
+        let mut chars = input.chars();
+        if matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+            && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+            && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+            && matches!(chars.next(), Some('-'))
+        {
+            // Panic: input has at at least 4 bytes so no out-of-bounds possible
+            let bytes = input.as_bytes();
+            let vendor = [bytes[0], bytes[1], bytes[2]];
+            let value = iana_token(chars.as_str())?;
+            Ok(XName {
+                vendor: Some(vendor),
+                value,
+            })
+        } else {
+            let value = iana_token(input)?;
+            Ok(XName {
+                vendor: None,
+                value,
+            })
         }
     }
 }
 
 /// parse `iana-token` (anything matching BNF not just registered tokens)
-fn parse_iana_token(input: &str) -> anyhow::Result<()> {
+fn iana_token(input: &str) -> anyhow::Result<&str> {
     if input.chars().all(|ch| ch.is_alphanumeric() || ch == '-') {
-        Ok(())
+        Ok(input)
     } else {
         // we use the term 'name' because it is easier to understand
         Err(anyhow!("{input} is not a valid name"))
     }
 }
 
-fn split_once_or_all(ch: char, input: &str) -> (&str, &str) {
-    match input.split_once(ch) {
-        Some((first, rest)) => (first, rest),
-        None => (input, ""),
+fn param_value(input: &str) -> anyhow::Result<&str> {
+    if input.starts_with('"') {
+        quoted_string(input)
+    } else {
+        param_text(input)
+    }
+}
+
+pub(crate) fn param_text<'src>(input: &'src str) -> anyhow::Result<&'src str> {
+    for ch in input.chars() {
+        safe_char(ch)?;
+    }
+    Ok(input)
+}
+
+fn safe_char(input: char) -> anyhow::Result<()> {
+    match input {
+        ch if ch.is_control() => bail!("control characters not allowed"),
+        ch @ '"' | ch @ ';' | ch @ ':' | ch @ ',' => bail!("`{ch}` not allowed"),
+        _ => Ok(()),
+    }
+}
+
+/// Returns `input` without the start and end quotes
+fn quoted_string(input: &str) -> anyhow::Result<&str> {
+    let mut iter = input.chars();
+    if !matches!(iter.next(), Some('"')) {
+        bail!("quoted string must start with `\"`");
+    }
+    if !matches!(iter.next_back(), Some('"')) {
+        bail!("quoted string must end with `\"`");
+    }
+    for ch in iter {
+        qsafe_char(ch)?;
+    }
+    Ok(input.trim_matches('"'))
+}
+
+fn qsafe_char(input: char) -> anyhow::Result<()> {
+    match input {
+        ch if ch.is_control() => bail!("control characters not allowed"),
+        '"' => bail!("`\"` is not allowed"),
+        _ => Ok(()),
     }
 }
 
@@ -244,16 +254,35 @@ mod tests {
                 params: vec![
                     Param {
                         name: Name::Iana("val1"),
-                        values: vec!["a", "b"]
+                        first_value: "a",
+                        rest_values: vec!["b"]
                     },
                     Param {
                         name: Name::XName(XName {
                             vendor: Some([b'a', b'a', b'a']),
                             value: "val2"
                         }),
-                        values: vec!["c", "d-d"]
+                        first_value: "c",
+                        rest_values: vec!["d-d"]
                     }
                 ],
+                value: "actual value"
+            }
+        )
+    }
+
+    #[test]
+    fn parse_xtension_no_vendor() {
+        let input = "X-param-name:actual value";
+        let output = super::parse_line(input).unwrap();
+        assert_eq!(
+            output,
+            Line {
+                name: Name::XName(XName {
+                    vendor: None,
+                    value: "param-name"
+                }),
+                params: vec![],
                 value: "actual value"
             }
         )

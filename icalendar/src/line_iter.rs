@@ -59,3 +59,30 @@ impl<'src> Iterator for LineIter<'src> {
         Some(Cow::Owned(output))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    macro_rules! gen_test {
+        ($name:ident : $input:expr => $output:expr) => {
+            #[test]
+            fn $name() {
+                let input = $input;
+                let output: Vec<_> = super::LineIter::new(input).collect();
+                assert_eq!(output, $output)
+            }
+        };
+    }
+    gen_test!(single_line: "SIMPLE:A simple line" => ["SIMPLE:A simple line"]);
+    gen_test!(two_lines: "Two\r\nlines" => ["Two", "lines"]);
+    gen_test!(single_line_with_newline: "Single\nline" => ["Single\nline"]);
+    gen_test!(continue_line: "Line with\r\n  continuation" => ["Line with continuation"]);
+    gen_test!(
+        mult_continue_line:
+        "First line\r\n  with continuation\r\nSecond line \r\nThird line wi\r\n th continuation" =>
+        [
+            "First line with continuation",
+            "Second line ",
+            "Third line with continuation"
+        ]
+    );
+}

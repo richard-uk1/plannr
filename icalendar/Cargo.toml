@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22.1"
+mediatype = "0.20.0"
+oxilangtag = "0.1.5"
+thiserror.workspace = true
+uriparse = "0.6.4"
 
 [dev-dependencies]
 anyhow.workspace = true

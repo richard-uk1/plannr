@@ -1,7 +1,11 @@
-use crate::parser::{line_iter, print_lines};
+use crate::parser::print_lines;
 
+mod content_line;
 mod line_iter;
+pub mod params;
 mod parser;
+mod types;
+mod values;
 
 /// iCal parser
 pub fn parse(input: &str) -> anyhow::Result<Calendar> {
