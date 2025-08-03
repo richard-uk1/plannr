@@ -88,6 +88,8 @@ impl fmt::Display for Date {
     }
 }
 
+// Time
+
 pub struct Time {
     pub hour: u8,
     pub minute: u8,
@@ -137,6 +139,114 @@ impl fmt::Display for Time {
             self.second,
             if self.utc { "Z" } else { "" }
         )
+    }
+}
+
+// Duration
+
+pub struct Duration {
+    pub negative: bool,
+    pub kind: DurationKind,
+}
+
+impl FromStr for Duration {
+    type Err = anyhow::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let (negative, input) = plus_or_minus(input);
+        if let Some(input) = input.strip_prefix("P") {
+            let kind = input.parse()?;
+            Ok(Duration { negative, kind })
+        } else {
+            bail!("expected `P`");
+        }
+    }
+}
+
+pub enum DurationKind {
+    Weeks(u32),
+    DateTime {
+        days: u32,
+        hours: u32,
+        minutes: u32,
+        seconds: u32,
+    },
+}
+
+impl FromStr for DurationKind {
+    type Err = anyhow::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if let Some(input) = input.strip_suffix('W') {
+            // must be week form
+            return Ok(DurationKind::Weeks(input.parse()?));
+        }
+
+        let (days, time) = input.split_once('T').unwrap_or((input, ""));
+        let days = if days.is_empty() { 0 } else { days.parse()? };
+        let (hours, time) = input.split_once('H').unwrap_or(("", time));
+        let hours = if hours.is_empty() { 0 } else { hours.parse()? };
+        let (minutes, seconds) = input.split_once('M').unwrap_or(("", time));
+        let minutes = if minutes.is_empty() {
+            0
+        } else {
+            minutes.parse()?
+        };
+        let seconds = if seconds.is_empty() {
+            0
+        } else {
+            let Some(seconds) = seconds.strip_suffix('S') else {
+                bail!("seconds missing 'S' suffix");
+            };
+            seconds.parse()?
+        };
+        Ok(Self::DateTime {
+            days,
+            hours,
+            minutes,
+            seconds,
+        })
+    }
+}
+
+// Period
+
+pub enum Period {
+    Explicit {
+        start: DateTime,
+        // TODO invariant, start must be before end.
+        end: DateTime,
+    },
+    Start {
+        start: DateTime,
+        // TODO invariant: duration should be positive
+        duration: Duration,
+    },
+}
+
+impl FromStr for Period {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let Some((start, rest)) = input.split_once('/') else {
+            bail!("missing '/' in period");
+        };
+        let start = start.parse()?;
+        Ok(if rest.starts_with('P') {
+            let duration = rest.parse()?;
+            Period::Start { start, duration }
+        } else {
+            let end = rest.parse()?;
+            Period::Explicit { start, end }
+        })
+    }
+}
+
+fn plus_or_minus(input: &str) -> (bool, &str) {
+    let mut iter = input.chars();
+    match iter.next() {
+        Some('+') => (false, iter.as_str()),
+        Some('-') => (true, iter.as_str()),
+        _ => (false, input),
     }
 }
 

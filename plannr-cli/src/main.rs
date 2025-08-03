@@ -1,3 +1,5 @@
+use std::{env::current_dir, fs};
+
 use anyhow::{Context, Result, anyhow, bail};
 use camino::Utf8Path;
 use clap::Parser;
@@ -240,10 +242,7 @@ async fn display_google_events() -> Result<()> {
     }
     dbg!(&res_head);
     let calendar = res_head.text().await?;
-    dbg!(&calendar);
-
-    let calendar = icalendar::parse(&calendar)?;
-    dbg!(calendar);
+    fs::write("calendar.txt", calendar)?;
     Ok(())
 }
 
@@ -255,7 +254,12 @@ async fn google_oauth_token(
         return Ok(token);
     }
 
-    let client = google_oauth_client(Utf8Path::new("google_creds.json"))?;
+    let client = google_oauth_client(Utf8Path::new("google_creds.json")).with_context(|| {
+        format!(
+            "google credential file at {}",
+            current_dir().unwrap().join("google_creds.json").display()
+        )
+    })?;
 
     // Generate a PKCE challenge.
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();

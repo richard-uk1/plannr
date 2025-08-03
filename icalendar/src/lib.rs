@@ -4,7 +4,7 @@ mod content_line;
 mod line_iter;
 pub mod params;
 mod parser;
-mod types;
+pub mod types;
 mod values;
 
 /// iCal parser

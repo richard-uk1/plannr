@@ -157,10 +157,10 @@ pub struct Delegators<'src> {
 impl<'src> Delegators<'src> {
     pub const PARAM_NAME: &'static str = "DELEGATED-FROM";
     pub fn parse_value(first: &'src str, rest: &'_ [&'src str]) -> anyhow::Result<Self> {
-        let first = CalendarUserAddress::parse(first)?;
+        let first = CalendarUserAddress::try_from(first)?;
         let rest = rest
             .iter()
-            .map(|val| CalendarUserAddress::parse(val))
+            .map(|val| CalendarUserAddress::try_from(*val))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Delegators { first, rest })
     }
@@ -186,10 +186,10 @@ pub struct Delegatees<'src> {
 impl<'src> Delegatees<'src> {
     pub const PARAM_NAME: &'static str = "DELEGATED-TO";
     pub fn parse_value(first: &'src str, rest: &'_ [&'src str]) -> anyhow::Result<Self> {
-        let first = CalendarUserAddress::parse(first)?;
+        let first = CalendarUserAddress::try_from(first)?;
         let rest = rest
             .iter()
-            .map(|val| CalendarUserAddress::parse(val))
+            .map(|val| CalendarUserAddress::try_from(*val))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Delegatees { first, rest })
     }
@@ -361,10 +361,10 @@ pub struct GroupOrMemberList<'src> {
 impl<'src> GroupOrMemberList<'src> {
     pub const PARAM_NAME: &'static str = "MEMBER";
     pub fn parse_value(first: &'src str, rest: &'_ [&'src str]) -> anyhow::Result<Self> {
-        let first = CalendarUserAddress::parse(first)?;
+        let first = CalendarUserAddress::try_from(first)?;
         let rest = rest
             .iter()
-            .map(|val| CalendarUserAddress::parse(val))
+            .map(|val| CalendarUserAddress::try_from(*val))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(GroupOrMemberList { first, rest })
     }
@@ -671,7 +671,7 @@ impl<'src> SentBy<'src> {
         if !rest.is_empty() {
             return Err(SingleParamError::SingleParam);
         }
-        Ok(SentBy(CalendarUserAddress::parse(first)?))
+        Ok(SentBy(CalendarUserAddress::try_from(first)?))
     }
 }
 
