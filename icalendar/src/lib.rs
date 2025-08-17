@@ -1,7 +1,9 @@
 use crate::parser::print_lines;
 
+#[macro_use]
+mod macros;
+
 mod content_line;
-mod line_iter;
 pub mod params;
 mod parser;
 pub mod types;

@@ -1,6 +1,5 @@
 //! Value types in icalendar
-use core::fmt;
-use std::{borrow::Cow, str::FromStr};
+use std::{borrow::Cow, fmt, str::FromStr};
 
 use anyhow::bail;
 pub use base64::DecodeError;
@@ -8,7 +7,7 @@ use base64::{display::Base64Display, prelude::*};
 use thiserror::Error;
 pub use uriparse::URIError;
 
-use crate::types;
+use crate::types::{self, time_hour, time_second};
 
 // BINARY
 
@@ -63,7 +62,7 @@ pub struct CalendarUserAddress<'src>(Uri<'src>);
 impl<'src> TryFrom<&'src str> for CalendarUserAddress<'src> {
     type Error = URIError;
     fn try_from(input: &'src str) -> Result<Self, Self::Error> {
-        Ok(CalendarUserAddress(Uri::parse(input)?))
+        Ok(CalendarUserAddress(Uri::try_from(input)?))
     }
 }
 
@@ -110,8 +109,9 @@ pub struct DateTime {
     pub rest: Vec<types::DateTime>,
 }
 
-impl DateTime {
-    pub fn parse(input: &str) -> Result<Self, anyhow::Error> {
+impl FromStr for DateTime {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, anyhow::Error> {
         let mut iter = input.split(',');
         // Unwrap: `split` always produces at least 1 value
         let first = iter.next().unwrap().parse()?;
@@ -129,8 +129,9 @@ pub struct Duration {
     pub rest: Vec<types::Duration>,
 }
 
-impl Duration {
-    pub fn parse(input: &str) -> Result<Self, anyhow::Error> {
+impl FromStr for Duration {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, anyhow::Error> {
         let mut iter = input.split(',');
         // Unwrap: `split` always produces at least 1 value
         let first = iter.next().unwrap().parse()?;
@@ -148,8 +149,9 @@ pub struct Float {
     pub rest: Vec<f64>,
 }
 
-impl Float {
-    pub fn parse(input: &str) -> Result<Self, anyhow::Error> {
+impl FromStr for Float {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, anyhow::Error> {
         let mut iter = input.split(',');
         // Unwrap: `split` always produces at least 1 value
         let first = iter.next().unwrap().parse()?;
@@ -167,8 +169,9 @@ pub struct Integer {
     pub rest: Vec<i64>,
 }
 
-impl Integer {
-    pub fn parse(input: &str) -> Result<Self, anyhow::Error> {
+impl FromStr for Integer {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
         let mut iter = input.split(',');
         // Unwrap: `split` always produces at least 1 value
         let first = iter.next().unwrap().parse()?;
@@ -186,8 +189,9 @@ pub struct Period {
     pub rest: Vec<types::Period>,
 }
 
-impl Period {
-    pub fn parse(input: &str) -> Result<Self, anyhow::Error> {
+impl FromStr for Period {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
         let mut iter = input.split(',');
         // Unwrap: `split` always produces at least 1 value
         let first = iter.next().unwrap().parse()?;
@@ -198,7 +202,7 @@ impl Period {
     }
 }
 
-// RECUR (TODO it's v complex)
+// RECUR
 
 // TEXT
 
@@ -208,8 +212,9 @@ pub struct Text<'src> {
     rest: Vec<Cow<'src, str>>,
 }
 
-impl<'src> Text<'src> {
-    pub fn parse(input: &'src str) -> Result<Text<'src>, anyhow::Error> {
+impl<'src> TryFrom<&'src str> for Text<'src> {
+    type Error = anyhow::Error;
+    fn try_from(input: &'src str) -> Result<Text<'src>, Self::Error> {
         let mut output = Text {
             first: Cow::Borrowed(""),
             rest: vec![],
@@ -239,7 +244,9 @@ impl<'src> Text<'src> {
         }
         Ok(output)
     }
+}
 
+impl<'src> Text<'src> {
     fn start_new(&mut self) {
         self.rest.push(Cow::Borrowed(""));
     }
@@ -261,8 +268,9 @@ pub struct Time {
     pub rest: Vec<types::Time>,
 }
 
-impl Time {
-    pub fn parse(input: &str) -> Result<Self, anyhow::Error> {
+impl FromStr for Time {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
         let mut iter = input.split(',');
         // Unwrap: `split` always produces at least 1 value
         let first = iter.next().unwrap().parse()?;
@@ -275,12 +283,11 @@ impl Time {
 
 // URI
 
-// UTC-OFFSET
-
 pub struct Uri<'src>(uriparse::URI<'src>);
 
-impl<'src> Uri<'src> {
-    pub fn parse(input: &'src str) -> Result<Self, URIError> {
+impl<'src> TryFrom<&'src str> for Uri<'src> {
+    type Error = URIError;
+    fn try_from(input: &'src str) -> Result<Self, Self::Error> {
         Ok(Uri(input.try_into()?))
     }
 }
@@ -291,15 +298,56 @@ impl<'src> fmt::Display for Uri<'src> {
     }
 }
 
+// UTC-OFFSET
+
+pub struct UtcOffset {
+    pub negative: bool,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+impl FromStr for UtcOffset {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let Some((sign, input)) = input.split_at_checked(1) else {
+            bail!("expected `+` or `-`");
+        };
+        let negative = match sign {
+            "+" => false,
+            "-" => true,
+            _ => bail!("expected `+` or `-`"),
+        };
+        let (input, hour) = time_hour(input)?;
+        let (input, minute) = time_hour(input)?;
+        let (input, second) = if !input.is_empty() {
+            ("", 0)
+        } else {
+            time_second(false, input)?
+        };
+        if !input.is_empty() {
+            bail!("trailing characters");
+        }
+        Ok(UtcOffset {
+            negative,
+            hour,
+            minute,
+            second,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::Text;
+
     #[test]
     fn text() {
         let input = r"First text:\,\;\nsecond line\Nthird line,second item\,,";
-        let text = super::Text::parse(input).unwrap();
+        let text = Text::try_from(input).unwrap();
         assert_eq!(
             text,
-            super::Text {
+            Text {
                 first: "First text:,;\nsecond line\nthird line".into(),
                 rest: vec!["second item,".into(), "".into()]
             }
@@ -308,7 +356,7 @@ mod tests {
 
     #[test]
     fn text_should_fail() {
-        assert!(super::Text::parse(";").is_err());
-        assert!(super::Text::parse("\\:").is_err());
+        assert!(Text::try_from(";").is_err());
+        assert!(Text::try_from("\\:").is_err());
     }
 }

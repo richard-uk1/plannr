@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-/// lines are split on `\r\n`, but with extension lines that start with a space
+/// Lines are split on `\r\n`, but single lines can also be split with `\r\n ` (extra space) between them.
 ///
 /// This iterator returns 'unfolded' lines
 pub struct LineIter<'src> {

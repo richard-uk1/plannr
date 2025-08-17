@@ -4,7 +4,21 @@ use core::fmt;
 
 use anyhow::{anyhow, bail};
 
-use crate::line_iter::LineIter;
+mod line_iter;
+use line_iter::LineIter;
+
+mod error;
+pub use error::{ParserError, ParserErrorKind};
+
+mod helpers;
+
+pub(crate) trait Parser {
+    type Output<'src>;
+    type Error: Into<ParserError>;
+
+    fn parse<'src>(&self, input: &'src str)
+    -> Result<(&'src str, Self::Output<'src>), Self::Error>;
+}
 
 pub fn print_lines(input: &str) {
     for line in LineIter::new(input) {

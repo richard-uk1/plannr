@@ -59,7 +59,7 @@ impl<'src> AlternativeTextRepresentation<'src> {
         if !rest_values.is_empty() {
             return Err(SingleParamError::SingleParam);
         }
-        Ok(AlternativeTextRepresentation(Uri::parse(first_value)?))
+        Ok(AlternativeTextRepresentation(Uri::try_from(first_value)?))
     }
 }
 
@@ -218,7 +218,7 @@ impl<'src> DirectoryEntryReference<'src> {
         if !rest.is_empty() {
             return Err(SingleParamError::SingleParam);
         }
-        Ok(DirectoryEntryReference(Uri::parse(first)?))
+        Ok(DirectoryEntryReference(Uri::try_from(first)?))
     }
 }
 
