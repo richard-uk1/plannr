@@ -1,7 +1,9 @@
 //! Schema for recognised parameters
+//!
+//! TODO Cowify
 
 use core::fmt;
-use std::error::Error as StdError;
+use std::{borrow::Cow, error::Error as StdError};
 
 use anyhow::{anyhow, bail};
 use mediatype::MediaType;
@@ -9,7 +11,7 @@ use oxilangtag::LanguageTag;
 use uriparse::URIError;
 
 use crate::{
-    parser::{Name, param_text},
+    parser::{Name, check_param_text},
     values::{CalendarUserAddress, Uri},
 };
 // NOTE: No double quotes in any param values. If the value contains
@@ -118,7 +120,7 @@ impl<'src> CalendarUserType<'src> {
             "RESOURCE" => Self::Resource,
             "ROOM" => Self::Room,
             "UNKNOWN" => Self::Unknown,
-            other => Self::Name(Name::parse(other)?),
+            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
         })
     }
 }
@@ -310,7 +312,7 @@ impl<'src> FreeBusyTimeType<'src> {
             "BUSY" => Self::Busy,
             "BUSY-UNAVAILABLE" => Self::BusyUnavailable,
             "BUSY-TENTATIVE" => Self::BusyTentative,
-            other => Self::Name(Name::parse(other)?),
+            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
         })
     }
 }
@@ -411,7 +413,7 @@ impl<'src> ParticipationStatus<'src> {
             "DELEGATED" => Self::Delegated,
             "COMPLETED" => Self::Completed,
             "IN-PROCESS" => Self::InProcess,
-            other => Self::Name(Name::parse(other)?),
+            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
         })
     }
 }
@@ -535,7 +537,7 @@ impl<'src> RelationshipType<'src> {
             "PARENT" => Self::Parent,
             "CHILD" => Self::Child,
             "SIBLING" => Self::Sibling,
-            other => Self::Name(Name::parse(other)?),
+            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
         })
     }
 }
@@ -589,7 +591,7 @@ impl<'src> ParticipationRole<'src> {
             "REQ-PARTICIPANT" => Self::ReqParticipant,
             "OPT-PARTICIPANT" => Self::OptParticipant,
             "NON-PARTICIPANT" => Self::NonParticipant,
-            other => Self::Name(Name::parse(other)?),
+            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
         })
     }
 }
@@ -701,10 +703,12 @@ impl<'src> TimeZoneIdentifier<'src> {
         let prefix = first.starts_with('/');
         let value = if prefix {
             // Panic: first character is ASCII so 1 byte
-            param_text(&first[1..])
+            check_param_text(&first[1..])?;
+            &first[1..]
         } else {
-            param_text(first)
-        }?;
+            check_param_text(first)?;
+            first
+        };
         Ok(Self { prefix, value })
     }
 
@@ -774,7 +778,7 @@ impl<'src> Value<'src> {
             "TIME" => Self::Time,
             "URI" => Self::Uri,
             "UTC-OFFSET" => Self::UtcOffset,
-            other => Self::Name(Name::parse(other)?),
+            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
         })
     }
 }

@@ -7,7 +7,7 @@ use base64::{display::Base64Display, prelude::*};
 use thiserror::Error;
 pub use uriparse::URIError;
 
-use crate::types::{self, time_hour, time_second};
+use crate::types::{self, VecOne, time_hour, time_second};
 
 // BINARY
 
@@ -104,10 +104,7 @@ impl fmt::Display for Date {
 
 // DATE-TIME
 
-pub struct DateTime {
-    pub first: types::DateTime,
-    pub rest: Vec<types::DateTime>,
-}
+pub struct DateTime(pub VecOne<types::DateTime>);
 
 impl FromStr for DateTime {
     type Err = anyhow::Error;
@@ -118,16 +115,13 @@ impl FromStr for DateTime {
         let rest = iter
             .map(|value| value.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { first, rest })
+        Ok(Self(VecOne { first, rest }))
     }
 }
 
 // DURATION
 
-pub struct Duration {
-    pub first: types::Duration,
-    pub rest: Vec<types::Duration>,
-}
+pub struct Duration(pub VecOne<types::Duration>);
 
 impl FromStr for Duration {
     type Err = anyhow::Error;
@@ -138,16 +132,13 @@ impl FromStr for Duration {
         let rest = iter
             .map(|value| value.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { first, rest })
+        Ok(Self(VecOne { first, rest }))
     }
 }
 
 // FLOAT
 
-pub struct Float {
-    pub first: f64,
-    pub rest: Vec<f64>,
-}
+pub struct Float(pub VecOne<f64>);
 
 impl FromStr for Float {
     type Err = anyhow::Error;
@@ -158,16 +149,13 @@ impl FromStr for Float {
         let rest = iter
             .map(|value| value.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { first, rest })
+        Ok(Self(VecOne { first, rest }))
     }
 }
 
 // INTEGER
 
-pub struct Integer {
-    pub first: i64,
-    pub rest: Vec<i64>,
-}
+pub struct Integer(pub VecOne<i64>);
 
 impl FromStr for Integer {
     type Err = anyhow::Error;
@@ -178,16 +166,13 @@ impl FromStr for Integer {
         let rest = iter
             .map(|value| value.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { first, rest })
+        Ok(Self(VecOne { first, rest }))
     }
 }
 
 // PERIOD
 
-pub struct Period {
-    pub first: types::Period,
-    pub rest: Vec<types::Period>,
-}
+pub struct Period(pub VecOne<types::Period>);
 
 impl FromStr for Period {
     type Err = anyhow::Error;
@@ -198,24 +183,36 @@ impl FromStr for Period {
         let rest = iter
             .map(|value| value.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { first, rest })
+        Ok(Self(VecOne { first, rest }))
     }
 }
 
 // RECUR
 
+pub struct Recur(pub VecOne<types::Recur>);
+
+impl FromStr for Recur {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut iter = s.split(",FREQ=");
+        let first: types::Recur = iter.next().unwrap().parse()?;
+        let mut rest = vec![];
+        for rule in iter {
+            rest.push(rule.parse()?);
+        }
+        Ok(Recur(VecOne { first, rest }))
+    }
+}
+
 // TEXT
 
 #[derive(Debug, PartialEq)]
-pub struct Text<'src> {
-    first: Cow<'src, str>,
-    rest: Vec<Cow<'src, str>>,
-}
+pub struct Text<'src>(pub VecOne<Cow<'src, str>>);
 
 impl<'src> TryFrom<&'src str> for Text<'src> {
     type Error = anyhow::Error;
     fn try_from(input: &'src str) -> Result<Text<'src>, Self::Error> {
-        let mut output = Text {
+        let mut output = VecOne {
             first: Cow::Borrowed(""),
             rest: vec![],
         };
@@ -242,31 +239,13 @@ impl<'src> TryFrom<&'src str> for Text<'src> {
                 _ => output.add_to_current(input, current_start, idx, ch),
             }
         }
-        Ok(output)
-    }
-}
-
-impl<'src> Text<'src> {
-    fn start_new(&mut self) {
-        self.rest.push(Cow::Borrowed(""));
-    }
-    fn current(&mut self) -> &mut Cow<'src, str> {
-        self.rest.last_mut().unwrap_or(&mut self.first)
-    }
-    fn add_to_current(&mut self, input: &'src str, current_start: usize, idx: usize, ch: char) {
-        match self.current() {
-            Cow::Borrowed(slice) => *slice = &input[current_start..idx + ch.len_utf8()],
-            Cow::Owned(string) => string.push(ch),
-        }
+        Ok(Self(output))
     }
 }
 
 // TIME
 
-pub struct Time {
-    pub first: types::Time,
-    pub rest: Vec<types::Time>,
-}
+pub struct Time(pub VecOne<types::Time>);
 
 impl FromStr for Time {
     type Err = anyhow::Error;
@@ -277,7 +256,7 @@ impl FromStr for Time {
         let rest = iter
             .map(|value| value.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { first, rest })
+        Ok(Self(VecOne { first, rest }))
     }
 }
 
@@ -339,6 +318,8 @@ impl FromStr for UtcOffset {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::VecOne;
+
     use super::Text;
 
     #[test]
@@ -347,10 +328,10 @@ mod tests {
         let text = Text::try_from(input).unwrap();
         assert_eq!(
             text,
-            Text {
+            Text(VecOne {
                 first: "First text:,;\nsecond line\nthird line".into(),
                 rest: vec!["second item,".into(), "".into()]
-            }
+            })
         )
     }
 

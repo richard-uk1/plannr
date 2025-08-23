@@ -1,9 +1,15 @@
+//! Types that are contained in either values or params
 use std::{fmt, str::FromStr};
 
 use anyhow::bail;
 use thiserror::Error;
 
+use crate::parser::ParserError;
+
 pub mod recur;
+
+mod vec_one;
+pub use vec_one::VecOne;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DateTime {
@@ -28,12 +34,21 @@ impl FromStr for DateTime {
 pub enum StrToDateTimeError {
     #[error("missing `T` in DateTime")]
     MissingT,
-    #[error("untyped error")]
+    #[error("other error")]
     Other(
         #[from]
         #[source]
-        anyhow::Error,
+        ParserError,
     ),
+}
+
+impl From<StrToDateTimeError> for ParserError {
+    fn from(value: StrToDateTimeError) -> Self {
+        match value {
+            StrToDateTimeError::MissingT => ParserError::tag("T"),
+            StrToDateTimeError::Other(parser_error) => parser_error,
+        }
+    }
 }
 
 impl fmt::Display for DateTime {
@@ -57,28 +72,28 @@ pub struct Date {
 }
 
 impl FromStr for Date {
-    type Err = anyhow::Error;
+    type Err = ParserError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         // all ascii so we can use u8,
         let mut iter = input.splitn(3, '-');
 
         let Some(date_fullyear) = iter.next() else {
-            bail!("missing year");
+            return Err(ParserError::expected("year"));
         };
         let full_year = date_fullyear.parse()?;
         let leap_year = full_year % 4 == 0;
 
         let Some(month) = iter.next() else {
-            bail!("missing month");
+            return Err(ParserError::expected("month"));
         };
         let month = month.parse()?;
         match month {
             1..=12 => (),
-            _ => bail!("invalid month"),
+            _ => return Err(ParserError::expected("valid month")),
         }
 
         let Some(day) = iter.next() else {
-            bail!("missing day");
+            return Err(ParserError::expected("day"));
         };
         let day = day.parse()?;
         let max_day = match month {
@@ -94,7 +109,7 @@ impl FromStr for Date {
             _ => 31,
         };
         if !(1..=max_day).contains(&day) {
-            bail!("day invalid for given month/year");
+            return Err(ParserError::expected("valid day for given month/year"));
         }
 
         Ok(Self {
@@ -122,7 +137,7 @@ pub struct Time {
 }
 
 impl FromStr for Time {
-    type Err = anyhow::Error;
+    type Err = ParserError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let (input, hour) = time_hour(input)?;
         let (input, minute) = time_minute(input)?;
@@ -131,7 +146,7 @@ impl FromStr for Time {
         let utc = match utc {
             "Z" => true,
             "" => false,
-            other => bail!("trailing characters in time: `{other}`"),
+            _ => return Err(ParserError::expected("no trailing characters in time")),
         };
         Ok(Self {
             hour,
@@ -155,43 +170,43 @@ impl fmt::Display for Time {
     }
 }
 
-pub(crate) fn time_hour(input: &str) -> anyhow::Result<(&str, u8)> {
+pub(crate) fn time_hour(input: &str) -> Result<(&str, u8), ParserError> {
     let Some((hour, rest)) = input.split_at_checked(2) else {
-        bail!("expected 2 ascii digits");
+        return Err(ParserError::expected("2 ascii digits"));
     };
     let hour = hour.parse()?;
     if hour >= 24 {
-        bail!("hours must be in 0-23");
+        return Err(ParserError::out_of_range("hour", 0, 23, hour));
     }
     Ok((rest, hour))
 }
 
-pub(crate) fn time_minute(input: &str) -> anyhow::Result<(&str, u8)> {
+pub(crate) fn time_minute(input: &str) -> Result<(&str, u8), ParserError> {
     let Some((minute, rest)) = input.split_at_checked(2) else {
-        bail!("expected 2 ascii digits");
+        return Err(ParserError::expected("2 ascii digits"));
     };
     let minute = minute.parse()?;
     if minute >= 60 {
-        bail!("minutes must be in 0-59");
+        return Err(ParserError::out_of_range("minute", 0, 60, minute));
     }
     Ok((rest, minute))
 }
 
-pub(crate) fn time_second(include_leap: bool, input: &str) -> anyhow::Result<(&str, u8)> {
-    let Some((minute, rest)) = input.split_at_checked(2) else {
-        bail!("expected 2 ascii digits");
+pub(crate) fn time_second(include_leap: bool, input: &str) -> Result<(&str, u8), ParserError> {
+    let Some((seconds, rest)) = input.split_at_checked(2) else {
+        return Err(ParserError::expected("2 ascii digits"));
     };
-    let minute = minute.parse()?;
+    let seconds = seconds.parse()?;
     if include_leap {
-        if minute >= 61 {
-            bail!("seconds must be in 0-60 (inc leap second");
+        if seconds >= 61 {
+            return Err(ParserError::out_of_range("seconds", 0, 60, seconds));
         }
     } else {
-        if minute >= 60 {
-            bail!("seconds must be in 0-59");
+        if seconds >= 60 {
+            return Err(ParserError::out_of_range("seconds", 0, 59, seconds));
         }
     }
-    Ok((rest, minute))
+    Ok((rest, seconds))
 }
 
 /// Note - ord is not chronological
@@ -202,12 +217,12 @@ pub enum DateOrDateTime {
 }
 
 impl FromStr for DateOrDateTime {
-    type Err = anyhow::Error;
+    type Err = ParserError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input.parse::<DateTime>() {
             Ok(dt) => return Ok(Self::DateTime(dt)),
             Err(StrToDateTimeError::MissingT) => (/* fallthru */),
-            Err(StrToDateTimeError::Other(e)) => bail!(e),
+            Err(StrToDateTimeError::Other(e)) => return Err(e),
         }
         Ok(Self::Date(input.parse()?))
     }
@@ -230,15 +245,15 @@ pub struct Duration {
 }
 
 impl FromStr for Duration {
-    type Err = anyhow::Error;
+    type Err = ParserError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let (negative, input) = plus_or_minus_opt(input);
+        let (input, negative) = opt_sign_is_negative(input);
         if let Some(input) = input.strip_prefix("P") {
             let kind = input.parse()?;
             Ok(Duration { negative, kind })
         } else {
-            bail!("expected `P`");
+            Err(ParserError::tag("P"))
         }
     }
 }
@@ -254,7 +269,7 @@ pub enum DurationKind {
 }
 
 impl FromStr for DurationKind {
-    type Err = anyhow::Error;
+    type Err = ParserError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         if let Some(input) = input.strip_suffix('W') {
@@ -276,7 +291,7 @@ impl FromStr for DurationKind {
             0
         } else {
             let Some(seconds) = seconds.strip_suffix('S') else {
-                bail!("seconds missing 'S' suffix");
+                return Err(ParserError::expected("`S` suffix"));
             };
             seconds.parse()?
         };
@@ -305,10 +320,10 @@ pub enum Period {
 }
 
 impl FromStr for Period {
-    type Err = anyhow::Error;
+    type Err = ParserError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let Some((start, rest)) = input.split_once('/') else {
-            bail!("missing '/' in period");
+            return Err(ParserError::expected("'/' in period"));
         };
         let start = start.parse()?;
         Ok(if rest.starts_with('P') {
@@ -323,11 +338,21 @@ impl FromStr for Period {
 
 // Recur
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Recur {
     pub freq: recur::Freq,
     pub end: recur::End,
-    pub interval: recur::Interval,
+    pub interval: Option<recur::Interval>,
+    pub by_second: Option<recur::BySecond>,
+    pub by_minute: Option<recur::ByMinute>,
+    pub by_hour: Option<recur::ByHour>,
+    pub by_week_day: Option<recur::ByWeekDay>,
+    pub by_month_day: Option<recur::ByMonthDay>,
+    pub by_year_day: Option<recur::ByYearDay>,
+    pub by_week_no: Option<recur::ByWeekNo>,
+    pub by_month: Option<recur::ByMonth>,
+    pub by_set_pos: Option<recur::BySetPos>,
+    pub week_start: Option<recur::WeekStart>,
 }
 
 impl Recur {
@@ -361,12 +386,12 @@ impl FromStr for Recur {
 }
 
 // checks for a `+` or `-` at the start, defaults to `+` if absent
-fn plus_or_minus_opt(input: &str) -> (bool, &str) {
+fn opt_sign_is_negative(input: &str) -> (&str, bool) {
     let mut iter = input.chars();
     match iter.next() {
-        Some('+') => (false, iter.as_str()),
-        Some('-') => (true, iter.as_str()),
-        _ => (false, input),
+        Some('+') => (iter.as_str(), false),
+        Some('-') => (iter.as_str(), true),
+        _ => (input, false),
     }
 }
 
@@ -397,7 +422,17 @@ mod tests {
             Recur {
                 freq: recur::Freq::Yearly,
                 end: recur::End::Forever,
-                interval: recur::Interval::new(1).unwrap(),
+                interval: None,
+                by_second: None,
+                by_minute: None,
+                by_hour: None,
+                by_week_day: None,
+                by_month_day: None,
+                by_year_day: None,
+                by_week_no: None,
+                by_month: None,
+                by_set_pos: None,
+                week_start: None
             }
         );
     }

@@ -5,7 +5,8 @@ use thiserror::Error;
 /// Couldn't parse the input as an iCalendar document.
 // This error is only built if the parse failed (unrecoverable error)
 // so we are less bothered about if some variants are large
-#[derive(Debug)]
+#[derive(Error, Debug)]
+#[error("{kind}")]
 pub struct ParserError {
     // todo span
     kind: ParserErrorKind,
@@ -13,8 +14,12 @@ pub struct ParserError {
 
 #[derive(Debug, Error)]
 pub enum ParserErrorKind {
-    #[error("expected {expected}")]
+    #[error("expected `{expected}`")]
     Tag { expected: &'static str },
+    // use this error type when you want to say you expected
+    // a non-literal value of some kind
+    #[error("expected {0}")]
+    Expected(&'static str),
     #[error("could not parse integer")]
     ParseInt {
         #[from]
@@ -44,6 +49,11 @@ impl ParserError {
         }
     }
 
+    pub(crate) fn expected(expected: &'static str) -> Self {
+        Self {
+            kind: ParserErrorKind::Expected(expected),
+        }
+    }
     pub(crate) fn out_of_range(
         ty: &'static str,
         min: impl Into<i64>,
