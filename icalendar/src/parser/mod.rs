@@ -1,26 +1,64 @@
 //! Turns text input into lines
 
-use core::fmt;
-use std::{borrow::Cow, collections::VecDeque};
+use std::borrow::Cow;
 
 use anyhow::{anyhow, bail};
 
-mod line_iter;
-use line_iter::LineIter;
+mod line;
+use line::Line;
 
 mod error;
 pub use error::ParserError;
 
-mod helpers;
+pub(crate) mod helpers;
 mod lexer;
 pub(crate) use lexer::Lexer;
 
+mod param_map;
+pub(crate) use param_map::ParamMap;
+
 use crate::{
-    Calendar, Result,
-    parser::helpers::{pop_front_bytes, split_once, split_once_outside_quotes, try_split_once},
+    AnnotatedText, Attachment, Attendee, CalScale, Calendar, Categories, Class, Comment, Contact,
+    Event, EventEnd, EventStatus, Organizer, RecurrenceId, Result, TimeTransparency,
+    params::{
+        CommonName, Delegatees, Delegators, DirectoryEntryReference, GroupOrListMember, Language,
+        SentBy,
+    },
+    parser::helpers::{check_iana_token, opt_vec_one_to_vec, parse_date_or_datetime},
+    types::{Data, DateOrDateTime, DateTime, Duration, GeoLocation, Name, Priority},
+    values::Text,
 };
 
+const ENCODING_PARAM: Name = Name::iana("ENCODING");
+const VALUE_PARAM: Name = Name::iana("VALUE");
+
+/// Macor for builders that expect 0 or 1 instances of a field
+macro_rules! impl_set_01 {
+    ($id:ident, $setter:ident, $ty:ty, $label:literal) => {
+        fn $setter(&mut self, $id: $ty) -> Result {
+            if self.$id.is_some() {
+                bail!(concat!("expected 0..=1 ", $label, ", found at least 2"));
+            }
+            self.$id = Some($id);
+            Ok(())
+        }
+    };
+}
+
+macro_rules! impl_set_1 {
+    ($id:ident, $setter:ident, $ty:ty, $label:literal) => {
+        fn $setter(&mut self, $id: $ty) -> Result {
+            if self.$id.is_some() {
+                bail!(concat!("expected 1 ", $label, ", found at least 2"));
+            }
+            self.$id = Some($id);
+            Ok(())
+        }
+    };
+}
+
 impl<'src> Calendar<'src> {
+    // Only this parse fn handles the BEGIN line, all others assume this was already parsed.
     pub(crate) fn parse(parser: &mut Lexer<'src>) -> Result<Self> {
         let Some(begin) = parser.take_next()? else {
             bail!("empty iterator: call is_empty before this function to avoid");
@@ -30,29 +68,102 @@ impl<'src> Calendar<'src> {
         }
 
         let mut builder = CalendarBuilder::new();
-        loop {
-            let Some(next) = parser.take_next()? else {
-                bail!("expected END:VCALENDAR");
-            };
+        while let Some(next) = parser.take_next()? {
             if &next.name == "END" {
                 if next.value != "VCALENDAR" {
-                    continue;
                     bail!("expected VCALENDAR, found {}", next.value);
                 }
-                break;
+                return Ok(builder.build()?);
             } else if &next.name == "PRODID" {
                 builder.set_prod_id(parse_prodid(next)?)?;
             } else if &next.name == "VERSION" {
                 builder.set_version(parse_version(next)?)?;
+            } else if &next.name == "CALSCALE" {
+                builder.set_cal_scale(parse_cal_scale(next)?)?;
+            } else if &next.name == "METHOD" {
+                check_iana_token(&next.value)?;
+                builder.set_method(next.value)?;
+            } else if &next.name == "BEGIN" {
+                // VEVENT, VTODO, etc.
+                if next.value == "VEVENT" {
+                    builder.events.push(Event::parse(parser)?);
+                } else {
+                    // TODO error instead?
+                    parser.skip_current()?;
+                }
             }
         }
-        Ok(builder.build()?)
+        bail!("unexpected EOF");
+    }
+}
+
+impl<'src> Event<'src> {
+    fn parse(parser: &mut Lexer<'src>) -> Result<Self> {
+        let mut builder = EventBuilder::default();
+        while let Some(next) = parser.take_next()? {
+            if &next.name == "END" {
+                if next.value != "VEVENT" {
+                    bail!("expected VEVENT, found {}", next.value);
+                }
+                return Ok(builder.build()?);
+            } else if &next.name == "CLASS" {
+                builder.set_class(parse_class(next.value)?)?;
+            } else if &next.name == "CREATED" {
+                builder.set_created(DateTime::parse(&*next.value)?.1)?;
+            } else if &next.name == "DESCRIPTION" {
+                builder.set_description(parse_annotated_text(next)?)?;
+            } else if &next.name == "DTSTART" {
+                builder.set_start(DateOrDateTime::parse(&*next.value)?.1)?;
+            } else if &next.name == "GEO" {
+                builder.set_geo_location(next.value.parse()?)?;
+            } else if &next.name == "LAST-MODIFIED" {
+                builder.set_last_modified(DateTime::parse(&*next.value)?.1)?;
+            } else if &next.name == "LOCATION" {
+                builder.set_location(parse_annotated_text(next)?)?;
+            } else if &next.name == "ORGANIZER" {
+                builder.set_organizer(parse_organizer(next)?)?;
+            } else if &next.name == "PRIORITY" {
+                builder.set_priority(next.value.parse()?)?;
+            } else if &next.name == "DTSTAMP" {
+                builder.set_timestamp(DateTime::parse(&*next.value)?.1)?;
+            } else if &next.name == "SEQ" {
+                builder.set_sequence(next.value.parse()?)?;
+            } else if &next.name == "STATUS" {
+                builder.set_status(parse_event_status(next)?)?;
+            } else if &next.name == "SUMMARY" {
+                builder.set_summary(parse_annotated_text(next)?)?;
+            } else if &next.name == "TRANSP" {
+                builder.set_time_transparency(parse_time_transparency(next)?)?;
+            } else if &next.name == "UID" {
+                builder.set_uid(next.value)?;
+            } else if &next.name == "RECURRENCE-ID" {
+                builder.set_recurrence_id(parse_recurrence_id(next)?)?;
+            } else if &next.name == "DTEND" {
+                builder.set_end(parse_datetime_end(next)?)?;
+            } else if &next.name == "DURATION" {
+                builder.set_end(EventEnd::Duration(Duration::parse(&*next.value)?.1))?;
+            } else if &next.name == "ATTACHMENT" {
+                builder.attachments.push(parse_attachment(next)?);
+            } else if &next.name == "ATTENDEE" {
+                builder.attendees.push(parse_attendee(next)?);
+            } else if &next.name == "CATEGORIES" {
+                builder.categories.push(parse_categories(next)?);
+            } else if &next.name == "COMMENT" {
+                builder.comments.push(parse_comment(next)?);
+            } else if &next.name == "CONTACT" {
+                builder.contacts.push(parse_contact(next)?);
+            } else if &next.name == "BEGIN" {
+                // skip all other subtrees
+                parser.skip_current()?;
+            }
+        }
+        bail!("unexpected EOF")
     }
 }
 
 fn parse_prodid<'src>(input: Line<'src>) -> Result<Cow<'src, str>> {
     debug_assert_eq!(&input.name, "PRODID");
-    if let Some(param) = input.non_x_param() {
+    if let Some(param) = input.first_iana_param() {
         bail!("unexpected param {param:?}");
     }
     Ok(input.value)
@@ -60,7 +171,7 @@ fn parse_prodid<'src>(input: Line<'src>) -> Result<Cow<'src, str>> {
 
 fn parse_version<'src>(input: Line<'src>) -> Result {
     debug_assert_eq!(&input.name, "VERSION");
-    if let Some(param) = input.non_x_param() {
+    if let Some(param) = input.first_iana_param() {
         bail!("unexpected param {param:?}");
     }
     if input.value != "2.0" {
@@ -69,9 +180,193 @@ fn parse_version<'src>(input: Line<'src>) -> Result {
     Ok(())
 }
 
+fn parse_cal_scale<'src>(input: Line<'src>) -> Result<CalScale<'src>> {
+    debug_assert_eq!(&input.name, "CALSCALE");
+    if let Some(param) = input.first_iana_param() {
+        bail!("unexpected param {param:?}");
+    }
+    if input.value == "GREGORIAN" {
+        Ok(CalScale::Gregorian)
+    } else {
+        check_iana_token(&input.value)?;
+        Ok(CalScale::Other(input.value))
+    }
+}
+
+fn parse_class<'src>(input: Cow<'src, str>) -> Result<Class<'src>> {
+    if input == "PUBLIC" {
+        Ok(Class::Public)
+    } else if input == "PRIVATE" {
+        Ok(Class::Private)
+    } else if input == "CONFIDENTIAL" {
+        Ok(Class::Confidential)
+    } else {
+        match Name::parse(input)? {
+            Name::XName(xname) => Ok(Class::XName(xname)),
+            Name::Iana(cow) => Ok(Class::Iana(cow)),
+        }
+    }
+}
+
+fn parse_annotated_text<'src>(mut input: Line<'src>) -> Result<AnnotatedText<'src>> {
+    let lang = input.params.take_ty()?;
+    let altrep = input.params.take_ty()?;
+
+    Ok(AnnotatedText {
+        lang,
+        altrep,
+        text: input.value,
+    })
+}
+
+fn parse_organizer<'src>(mut input: Line<'src>) -> Result<Organizer<'src>> {
+    let common_name = input.params.take_ty::<CommonName<'src>>()?;
+    let dir = input.params.take_ty()?;
+    let sent_by = input.params.take_ty()?;
+    let lang = input.params.take_ty()?;
+    let value = input.value.try_into()?;
+
+    Ok(Organizer {
+        dir,
+        common_name: common_name.map(|v| v.0),
+        sent_by,
+        lang,
+        value,
+    })
+}
+
+fn parse_event_status(input: Line<'_>) -> Result<EventStatus> {
+    match &*input.value {
+        "TENTATIVE" => Ok(EventStatus::Tentative),
+        "CONFIRMED" => Ok(EventStatus::Confirmed),
+        "CANCELLED" => Ok(EventStatus::Cancelled),
+        other => bail!("unexpected status {other}"),
+    }
+}
+
+fn parse_time_transparency(input: Line<'_>) -> Result<TimeTransparency> {
+    match &*input.value {
+        "OPAQUE" => Ok(TimeTransparency::Opaque),
+        "TRANSPARENT" => Ok(TimeTransparency::Transparent),
+        other => bail!("unexpected time transparency value {other}"),
+    }
+}
+
+fn parse_recurrence_id<'src>(mut input: Line<'src>) -> Result<RecurrenceId<'src>> {
+    let range = input.params.take_ty()?;
+    let timezone_id = input.params.take_ty()?;
+    let value = parse_date_or_datetime(&mut input)?;
+
+    Ok(RecurrenceId {
+        range,
+        timezone_id,
+        value,
+    })
+}
+
+fn parse_datetime_end<'src>(mut input: Line<'src>) -> Result<EventEnd<'src>> {
+    let timezone_id = input.params.take_ty()?;
+
+    let value = parse_date_or_datetime(&mut input)?;
+
+    Ok(EventEnd::DateTime { value, timezone_id })
+}
+
+fn parse_attachment<'src>(mut input: Line<'src>) -> Result<Attachment<'src>> {
+    let fmt_type = input.params.take_ty()?;
+    let data = if let Some(v) = input.params.take(&VALUE_PARAM) {
+        let v = v.get_single()?;
+        if v != "BINARY" {
+            bail!("only BINARY value is allowed");
+        }
+        let Some(enc) = input.params.take(&ENCODING_PARAM) else {
+            bail!("cannot have VALUE without ENCODING");
+        };
+        let enc = enc.get_single()?;
+        if enc != "BASE64" {
+            bail!("only BASE64 encoding is allowed");
+        }
+        Data::parse_blob(input.value)?
+    } else {
+        Data::parse_uri(input.value)?
+    };
+
+    Ok(Attachment { fmt_type, data })
+}
+
+fn parse_attendee<'src>(mut input: Line<'src>) -> Result<Attendee<'src>> {
+    let cutype = input.params.take_ty()?;
+    let group_or_list_members = input.params.take_ty::<GroupOrListMember<'src>>()?;
+    let group_or_list_members = opt_vec_one_to_vec(group_or_list_members.map(|list| list.0));
+
+    let role = input.params.take_ty()?;
+    let participation_status = input.params.take_ty()?;
+    let rsvp = input.params.take_ty()?;
+
+    let delegated_to = input.params.take_ty::<Delegatees<'src>>()?;
+    let delegated_to = opt_vec_one_to_vec(delegated_to.map(|list| list.0));
+
+    let delegated_from = input.params.take_ty::<Delegators<'src>>()?;
+    let delegated_from = opt_vec_one_to_vec(delegated_from.map(|list| list.0));
+
+    let sent_by = input.params.take_ty::<SentBy>()?;
+    let cn = input.params.take_ty::<CommonName<'src>>()?;
+    let dir = input.params.take_ty::<DirectoryEntryReference<'src>>()?;
+    let lang = input.params.take_ty::<Language<'src>>()?;
+
+    Ok(Attendee {
+        cutype: cutype.unwrap_or_default(),
+        group_or_list_members,
+        role: role.unwrap_or_default(),
+        participation_status: participation_status.unwrap_or_default(),
+        rsvp: rsvp.unwrap_or_default(),
+        delegated_to,
+        delegated_from,
+        sent_by: sent_by.map(|v| v.0),
+        common_name: cn.map(|v| v.0),
+        dir,
+        lang,
+    })
+}
+
+fn parse_categories<'src>(mut input: Line<'src>) -> Result<Categories<'src>> {
+    let lang = input.params.take_ty()?;
+    let values = Text::try_from(input.value)?;
+
+    Ok(Categories {
+        lang,
+        values: values.0,
+    })
+}
+
+fn parse_comment<'src>(mut input: Line<'src>) -> Result<Comment<'src>> {
+    let lang = input.params.take_ty()?;
+    let altrep = input.params.take_ty()?;
+
+    Ok(Comment {
+        lang,
+        altrep,
+        value: input.value,
+    })
+}
+
+fn parse_contact<'src>(mut input: Line<'src>) -> Result<Contact<'src>> {
+    let lang = input.params.take_ty()?;
+    let altrep = input.params.take_ty()?;
+
+    Ok(Contact {
+        lang,
+        altrep,
+        value: input.value,
+    })
+}
+
 struct CalendarBuilder<'src> {
     prod_id: Option<Cow<'src, str>>,
     version_set: bool,
+    cal_scale: Option<CalScale<'src>>,
+    method: Option<Cow<'src, str>>,
+    events: Vec<Event<'src>>,
 }
 
 impl<'src> CalendarBuilder<'src> {
@@ -79,6 +374,9 @@ impl<'src> CalendarBuilder<'src> {
         Self {
             prod_id: None,
             version_set: false,
+            cal_scale: None,
+            method: None,
+            events: vec![],
         }
     }
 
@@ -87,16 +385,13 @@ impl<'src> CalendarBuilder<'src> {
             prod_id: self
                 .prod_id
                 .ok_or_else(|| anyhow!("PRODID not specified"))?,
+            cal_scale: self.cal_scale.unwrap_or_default(),
+            method: self.method,
+            events: self.events,
         })
     }
 
-    fn set_prod_id(&mut self, prod_id: Cow<'src, str>) -> Result {
-        if self.prod_id.is_some() {
-            bail!("expected 1 PRODID, found at least 2");
-        }
-        self.prod_id = Some(prod_id);
-        Ok(())
-    }
+    impl_set_01!(prod_id, set_prod_id, Cow<'src, str>, "PRODID");
 
     fn set_version(&mut self, (): ()) -> Result {
         if self.version_set {
@@ -104,360 +399,117 @@ impl<'src> CalendarBuilder<'src> {
         }
         Ok(())
     }
+
+    impl_set_01!(cal_scale, set_cal_scale, CalScale<'src>, "CALSCALE");
+    impl_set_01!(method, set_method, Cow<'src, str>, "METHOD");
 }
 
-/// for debug TODO delete me
-pub fn print_lines(input: &str) {
-    for line in LineIter::new(input) {
-        println!("{:#?}", Line::parse(line).unwrap());
-    }
+#[derive(Default)]
+pub struct EventBuilder<'src> {
+    class: Option<Class<'src>>,
+    created: Option<DateTime>,
+    description: Option<AnnotatedText<'src>>,
+    start: Option<DateOrDateTime>,
+    geo: Option<GeoLocation>,
+    last_modified: Option<DateTime>,
+    location: Option<AnnotatedText<'src>>,
+    organizer: Option<Organizer<'src>>,
+    priority: Option<Priority>,
+    timestamp: Option<DateTime>,
+    sequence: Option<u64>,
+    status: Option<EventStatus>,
+    summary: Option<AnnotatedText<'src>>,
+    time_transparency: Option<TimeTransparency>,
+    uid: Option<Cow<'src, str>>,
+    recurrence_id: Option<RecurrenceId<'src>>,
+    end: Option<EventEnd<'src>>,
+    attachments: Vec<Attachment<'src>>,
+    attendees: Vec<Attendee<'src>>,
+    categories: Vec<Categories<'src>>,
+    comments: Vec<Comment<'src>>,
+    contacts: Vec<Contact<'src>>,
 }
 
-/// Parsed input line
-///
-/// Intermediate stage in calendar parsing
-#[derive(Debug, PartialEq)]
-struct Line<'src> {
-    name: Name<'src>,
-    params: Vec<Param<'src>>,
-    value: Cow<'src, str>,
-}
+impl<'src> EventBuilder<'src> {
+    impl_set_01!(class, set_class, Class<'src>, "CLASS");
 
-impl<'src> Line<'src> {
-    fn parse(input: impl Into<Cow<'src, str>>) -> anyhow::Result<Self> {
-        let input = input.into();
-
-        // no escaping in name so easier to parse
-        let (prefix, value) = match try_split_once(input, ':') {
-            Ok(v) => v,
-            Err(input) => bail!("malformed icalendar line: {input}"),
-        };
-        let (name, params_str) = split_once(prefix, ';');
-
-        let name = Name::parse(name)?;
-
-        let mut params = vec![];
-        let mut loop_rest = params_str;
-        while !loop_rest.is_empty() {
-            // slightly inefficient to look ahead for ';' I think but much simpler and easier to program.
-            let (first_param, rest) = split_once_outside_quotes(loop_rest, ';');
-            params.push(Param::parse(first_param)?);
-            loop_rest = rest;
+    fn set_created(&mut self, created: DateTime) -> Result {
+        if self.created.is_some() {
+            bail!("expected 0..=1 CREATED, found at least 2");
         }
-        Ok(Line {
-            name,
-            params,
-            value,
-        })
-    }
-
-    pub(crate) fn non_x_param(&self) -> Option<&Param> {
-        self.params.iter().find(|param| param.name.is_extension())
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct Param<'src> {
-    pub name: Name<'src>,
-    // values are comma-separated list, at least one
-    pub first_value: Cow<'src, str>,
-    pub rest_values: Vec<Cow<'src, str>>,
-}
-
-impl<'src> Param<'src> {
-    fn parse(input: Cow<'src, str>) -> anyhow::Result<Param<'src>> {
-        let (name, rest) = match try_split_once(input, '=') {
-            Ok(v) => v,
-            Err(input) => bail!("invalid parameter `{input}`: no '='"),
-        };
-
-        let name = Name::parse(name)?;
-        let (first_value, rest) = split_once_outside_quotes(rest, ',');
-        let first_value = param_value(first_value)?;
-
-        let mut rest_loop = rest;
-        let mut rest_values = vec![];
-        while !rest_loop.is_empty() {
-            let (next_param, rest) = split_once_outside_quotes(rest_loop, ',');
-            // we're pretty lax here but it will work on well-formed input and not do anything too stupid
-            // on malformed input
-
-            rest_values.push(param_value(next_param)?);
-            rest_loop = rest;
+        if !created.time.utc {
+            bail!("expected UTC time");
         }
-        Ok(Param {
-            name,
-            first_value,
-            rest_values,
-        })
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Name<'src> {
-    XName(XName<'src>),
-    Iana(Cow<'src, str>),
-}
-
-impl<'src> Name<'src> {
-    pub fn is_extension(&self) -> bool {
-        matches!(self, Name::XName(_))
-    }
-}
-
-impl fmt::Display for Name<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Name::XName(xname) => fmt::Display::fmt(xname, f),
-            Name::Iana(iana) => fmt::Display::fmt(iana, f),
-        }
-    }
-}
-
-impl<'src> Name<'src> {
-    pub fn parse(input: Cow<'src, str>) -> anyhow::Result<Self> {
-        match input {
-            Cow::Borrowed(s) => {
-                if matches!(s.get(0..2), Some("X-")) {
-                    let x_name = XName::parse(Cow::Borrowed(&s[2..]))?;
-                    Ok(Name::XName(x_name))
-                } else {
-                    check_iana_token(&s)?;
-                    Ok(Name::Iana(Cow::Borrowed(s)))
-                }
-            }
-            Cow::Owned(mut s) => {
-                if matches!(s.get(0..2), Some("X-")) {
-                    pop_front_bytes(&mut s, 2);
-                    let x_name = XName::parse(Cow::Owned(s))?;
-                    Ok(Name::XName(x_name))
-                } else {
-                    check_iana_token(&s)?;
-                    Ok(Name::Iana(Cow::Owned(s)))
-                }
-            }
-        }
-    }
-}
-
-impl<'a> PartialEq<str> for Name<'a> {
-    fn eq(&self, other: &str) -> bool {
-        match self {
-            Name::XName(xname) => {
-                let Ok(other) = XName::parse(Cow::Borrowed(other)) else {
-                    return false;
-                };
-                xname == &other
-            }
-            Name::Iana(name) => *name == other,
-        }
-    }
-}
-
-impl<'a> PartialEq<Name<'a>> for str {
-    fn eq(&self, other: &Name<'a>) -> bool {
-        other.eq(self)
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct XName<'src> {
-    /// 3-character ascii alphanumeric
-    pub vendor: Option<[u8; 3]>,
-    pub value: Cow<'src, str>,
-}
-
-impl fmt::Display for XName<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn c(input: u8) -> char {
-            // Unwrap: cannot fail as vendor is alphanumeric
-            char::from_u32(input.into()).unwrap()
-        }
-        write!(f, "X-")?;
-        if let Some(vendor) = &self.vendor {
-            write!(f, "{}{}{}-", c(vendor[0]), c(vendor[1]), c(vendor[2]))?;
-        }
-        // value is alphanumeric or '-'
-        fmt::Display::fmt(&self.value, f)
-    }
-}
-
-impl<'src> XName<'src> {
-    /// Currently we don't check that the value (after the vendor ID) satisfies `[0-9a-zA-z-]*`
-    fn parse(input: Cow<'src, str>) -> anyhow::Result<XName<'src>> {
-        match input {
-            Cow::Borrowed(s) => Self::parse_borrowed(s),
-            Cow::Owned(s) => Self::parse_owned(s),
-        }
-    }
-
-    fn parse_borrowed(input: &'src str) -> Result<XName<'src>> {
-        let mut chars = input.chars();
-        if matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-            && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-            && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-            && matches!(chars.next(), Some('-'))
-        {
-            // Panic: input has at at least 4 bytes so no out-of-bounds possible
-            let bytes = input.as_bytes();
-            let vendor = [bytes[0], bytes[1], bytes[2]];
-            let value = chars.as_str();
-            check_iana_token(value)?;
-            Ok(XName {
-                vendor: Some(vendor),
-                value: Cow::Borrowed(value),
-            })
-        } else {
-            check_iana_token(input)?;
-            Ok(XName {
-                vendor: None,
-                value: Cow::Borrowed(input),
-            })
-        }
-    }
-
-    fn parse_owned(mut input: String) -> Result<XName<'static>> {
-        let mut chars = input.chars();
-        let (vendor, value) = if matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-            && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-            && matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-            && matches!(chars.next(), Some('-'))
-        {
-            let prefix_len = input.len() - chars.as_str().len();
-            let vendor = input.as_bytes();
-            let vendor = [vendor[0], vendor[1], vendor[2]];
-            pop_front_bytes(&mut input, prefix_len);
-            (Some(vendor), input)
-        } else {
-            // cannot have a vendor
-            (None, input)
-        };
-        check_iana_token(&value)?;
-        Ok(XName {
-            vendor,
-            value: Cow::Owned(value),
-        })
-    }
-}
-
-/// parse `iana-token` (anything matching BNF not just registered tokens)
-fn check_iana_token(input: &str) -> Result {
-    if input.chars().all(|ch| ch.is_alphanumeric() || ch == '-') {
+        self.created = Some(created);
         Ok(())
-    } else {
-        // we use the term 'name' because it is easier to understand
-        Err(anyhow!("{input} is not a valid name"))
     }
-}
 
-fn param_value<'src>(input: Cow<'src, str>) -> Result<Cow<'src, str>> {
-    if input.starts_with('"') {
-        quoted_string(input)
-    } else {
-        check_param_text(&input)?;
-        Ok(input)
-    }
-}
+    impl_set_01!(
+        description,
+        set_description,
+        AnnotatedText<'src>,
+        "DESCRIPTION"
+    );
+    impl_set_01!(start, set_start, DateOrDateTime, "START");
+    impl_set_01!(geo, set_geo_location, GeoLocation, "GEO");
+    impl_set_01!(last_modified, set_last_modified, DateTime, "LAST-MODIFIED");
+    impl_set_01!(location, set_location, AnnotatedText<'src>, "LOCATION");
+    impl_set_01!(organizer, set_organizer, Organizer<'src>, "ORGANIZER");
+    impl_set_01!(priority, set_priority, Priority, "PRIORITY");
+    impl_set_01!(timestamp, set_timestamp, DateTime, "DTSTAMP");
+    impl_set_01!(sequence, set_sequence, u64, "SEQ");
+    impl_set_01!(status, set_status, EventStatus, "STATUS");
+    impl_set_01!(summary, set_summary, AnnotatedText<'src>, "SUMMARY");
+    impl_set_01!(
+        time_transparency,
+        set_time_transparency,
+        TimeTransparency,
+        "TRANSP"
+    );
+    impl_set_1!(uid, set_uid, Cow<'src, str>, "UID");
+    impl_set_01!(
+        recurrence_id,
+        set_recurrence_id,
+        RecurrenceId<'src>,
+        "RECURRENCE-ID"
+    );
 
-pub(crate) fn check_param_text<'src>(input: &'src str) -> Result<()> {
-    for ch in input.chars() {
-        safe_char(ch)?;
-    }
-    Ok(())
-}
-
-fn safe_char(input: char) -> anyhow::Result<()> {
-    match input {
-        ch if ch.is_control() => bail!("control characters not allowed"),
-        ch @ '"' | ch @ ';' | ch @ ':' | ch @ ',' => bail!("`{ch}` not allowed"),
-        _ => Ok(()),
-    }
-}
-
-/// Returns `input` without the start and end quotes
-fn quoted_string(input: Cow<'_, str>) -> anyhow::Result<Cow<'_, str>> {
-    let mut iter = input.chars();
-    if !matches!(iter.next(), Some('"')) {
-        bail!("quoted string must start with `\"`");
-    }
-    if !matches!(iter.next_back(), Some('"')) {
-        bail!("quoted string must end with `\"`");
-    }
-    for ch in iter {
-        qsafe_char(ch)?;
-    }
-    // pop front and back quotes
-    Ok(match input {
-        Cow::Borrowed(input) => Cow::Borrowed(input.trim_matches('"')),
-        Cow::Owned(mut input) => {
-            input.pop();
-            // big copy, but doesn't allocate
-            input.remove(0);
-            Cow::Owned(input)
+    fn set_end(&mut self, end: EventEnd<'src>) -> Result {
+        if self.end.is_some() {
+            bail!("expected 0..1 of DTEND | DURATION, found at least 2");
         }
-    })
-}
 
-fn qsafe_char(input: char) -> anyhow::Result<()> {
-    match input {
-        ch if ch.is_control() => bail!("control characters not allowed"),
-        '"' => bail!("`\"` is not allowed"),
-        _ => Ok(()),
+        self.end = Some(end);
+        Ok(())
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use std::borrow::Cow;
-
-    use super::{Line, Name, Param, XName};
-
-    #[test]
-    fn parse_line() {
-        let input = "param-name;val1=a,b;X-aaa-val2=\"c\",d-d:actual value";
-        let expected = Line {
-            name: Name::Iana(Cow::Borrowed("param-name")),
-            params: vec![
-                Param {
-                    name: Name::Iana(Cow::Borrowed("val1")),
-                    first_value: Cow::Borrowed("a"),
-                    rest_values: vec![Cow::Borrowed("b")],
-                },
-                Param {
-                    name: Name::XName(XName {
-                        vendor: Some([b'a', b'a', b'a']),
-                        value: Cow::Borrowed("val2"),
-                    }),
-                    first_value: Cow::Borrowed("c"),
-                    rest_values: vec![Cow::Borrowed("d-d")],
-                },
-            ],
-            value: Cow::Borrowed("actual value"),
+    fn build(self) -> Result<Event<'src>> {
+        let Some(uid) = self.uid else {
+            bail!("missing UID on VEVENT");
         };
-
-        // borrowed
-        let output = Line::parse(input).unwrap();
-        assert_eq!(output, expected);
-
-        // owned
-        let output = Line::parse(input.to_string()).unwrap();
-        assert_eq!(output, expected);
-    }
-
-    #[test]
-    fn parse_xtension_no_vendor() {
-        let input = "X-param-name:actual value";
-        let output = Line::parse(input).unwrap();
-        assert_eq!(
-            output,
-            Line {
-                name: Name::XName(XName {
-                    vendor: None,
-                    value: Cow::Borrowed("param-name")
-                }),
-                params: vec![],
-                value: Cow::Borrowed("actual value")
-            }
-        )
+        Ok(Event {
+            class: self.class.unwrap_or_default(),
+            created: self.created,
+            description: self.description,
+            start: self.start,
+            geo_location: self.geo,
+            last_modified: self.last_modified,
+            location: self.location,
+            organizer: self.organizer,
+            priority: self.priority,
+            timestamp: self.timestamp,
+            sequence: self.sequence,
+            status: self.status,
+            summary: self.summary,
+            time_transparency: self.time_transparency.unwrap_or_default(),
+            uid,
+            recurrence_id: self.recurrence_id,
+            end: self.end,
+            attachments: self.attachments,
+            attendees: self.attendees,
+            categories: self.categories,
+            comments: self.comments,
+            contacts: self.contacts,
+        })
     }
 }

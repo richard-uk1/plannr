@@ -9,7 +9,18 @@ pub fn main() -> anyhow::Result<()> {
             current_dir().unwrap().join("calendar.txt").display(),
         )
     })?;
-    let calendar = icalendar::parse(&raw)?;
+    let calendar = &mut icalendar::parse(&raw)?[0];
+
+    calendar
+        .events
+        .sort_by(|ev1, ev2| ev1.start.unwrap().cmp(&ev2.start.unwrap()));
     dbg!(calendar);
+    /*
+    for event in &calendar[0].events {
+        if !event.attachments.is_empty() {
+            println!("{event:?}");
+        }
+    }
+    */
     Ok(())
 }

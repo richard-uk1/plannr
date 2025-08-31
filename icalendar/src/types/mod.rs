@@ -2,52 +2,44 @@
 use std::{fmt, str::FromStr};
 
 use anyhow::bail;
-use thiserror::Error;
 
-use crate::parser::ParserError;
+use crate::{
+    Result,
+    parser::{
+        ParserError,
+        helpers::{_1or2_digit_int, _1to4_digit_int, parse_u32, tag},
+    },
+};
 
 pub mod recur;
 
 mod vec_one;
 pub use vec_one::VecOne;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+mod name;
+pub use name::{Name, XName};
+
+mod location;
+pub use location::GeoLocation;
+
+mod priority;
+pub use priority::Priority;
+
+mod data;
+pub use data::Data;
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DateTime {
     pub date: Date,
     pub time: Time,
 }
 
-impl FromStr for DateTime {
-    type Err = StrToDateTimeError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let Some((date, time)) = s.split_once('T') else {
-            return Err(StrToDateTimeError::MissingT);
-        };
-        Ok(Self {
-            date: date.parse()?,
-            time: time.parse()?,
-        })
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum StrToDateTimeError {
-    #[error("missing `T` in DateTime")]
-    MissingT,
-    #[error("other error")]
-    Other(
-        #[from]
-        #[source]
-        ParserError,
-    ),
-}
-
-impl From<StrToDateTimeError> for ParserError {
-    fn from(value: StrToDateTimeError) -> Self {
-        match value {
-            StrToDateTimeError::MissingT => ParserError::tag("T"),
-            StrToDateTimeError::Other(parser_error) => parser_error,
-        }
+impl DateTime {
+    pub fn parse(input: &str) -> Result<(&str, Self)> {
+        let (input, date) = Date::parse(input)?;
+        let (input, _) = tag("T")(input)?;
+        let (input, time) = Time::parse(input)?;
+        Ok((input, DateTime { date, time }))
     }
 }
 
@@ -57,7 +49,13 @@ impl fmt::Display for DateTime {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+impl fmt::Debug for DateTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?} {:?}", self.date, self.time)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Date {
     /// Full year
     // only positive years allowed
@@ -71,31 +69,15 @@ pub struct Date {
     pub day: u8,
 }
 
-impl FromStr for Date {
-    type Err = ParserError;
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
+impl Date {
+    pub(crate) fn parse(input: &str) -> Result<(&str, Self)> {
         // all ascii so we can use u8,
-        let mut iter = input.splitn(3, '-');
 
-        let Some(date_fullyear) = iter.next() else {
-            return Err(ParserError::expected("year"));
-        };
-        let full_year = date_fullyear.parse()?;
+        let (input, full_year) = _1to4_digit_int("year", u16::MIN, u16::MAX)(input)?;
         let leap_year = full_year % 4 == 0;
 
-        let Some(month) = iter.next() else {
-            return Err(ParserError::expected("month"));
-        };
-        let month = month.parse()?;
-        match month {
-            1..=12 => (),
-            _ => return Err(ParserError::expected("valid month")),
-        }
+        let (input, month) = _1or2_digit_int("month", 1, 12)(input)?;
 
-        let Some(day) = iter.next() else {
-            return Err(ParserError::expected("day"));
-        };
-        let day = day.parse()?;
         let max_day = match month {
             2 => {
                 if leap_year {
@@ -108,19 +90,26 @@ impl FromStr for Date {
             4 | 6 | 9 | 11 => 30,
             _ => 31,
         };
-        if !(1..=max_day).contains(&day) {
-            return Err(ParserError::expected("valid day for given month/year"));
-        }
+        let (input, day) = _1or2_digit_int("day", 1, max_day)(input)?;
 
-        Ok(Self {
-            full_year,
-            month,
-            day,
-        })
+        Ok((
+            input,
+            Self {
+                full_year,
+                month,
+                day,
+            },
+        ))
     }
 }
 
 impl fmt::Display for Date {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04}{:02}{:02}", self.full_year, self.month, self.day)
+    }
+}
+
+impl fmt::Debug for Date {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04}-{:02}-{:02}", self.full_year, self.month, self.day)
     }
@@ -128,7 +117,7 @@ impl fmt::Display for Date {
 
 // Time
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Time {
     pub hour: u8,
     pub minute: u8,
@@ -136,24 +125,26 @@ pub struct Time {
     pub utc: bool,
 }
 
-impl FromStr for Time {
-    type Err = ParserError;
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
+impl Time {
+    pub fn parse(input: &str) -> Result<(&str, Self)> {
         let (input, hour) = time_hour(input)?;
         let (input, minute) = time_minute(input)?;
-        let (utc, second) = time_second(true, input)?;
+        let (input, second) = time_second(true, input)?;
 
-        let utc = match utc {
-            "Z" => true,
-            "" => false,
-            _ => return Err(ParserError::expected("no trailing characters in time")),
+        let mut iter = input.chars();
+        let (input, utc) = match iter.next() {
+            Some('Z') => (iter.as_str(), true),
+            _ => (input, false),
         };
-        Ok(Self {
-            hour,
-            minute,
-            second,
-            utc,
-        })
+        Ok((
+            input,
+            Self {
+                hour,
+                minute,
+                second,
+                utc,
+            },
+        ))
     }
 }
 
@@ -166,6 +157,19 @@ impl fmt::Display for Time {
             self.minute,
             self.second,
             if self.utc { "Z" } else { "" }
+        )
+    }
+}
+
+impl fmt::Debug for Time {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:02}:{:02}:{:02}{}",
+            self.hour,
+            self.minute,
+            self.second,
+            if self.utc { " Z" } else { "" }
         )
     }
 }
@@ -210,21 +214,22 @@ pub(crate) fn time_second(include_leap: bool, input: &str) -> Result<(&str, u8),
 }
 
 /// Note - ord is not chronological
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DateOrDateTime {
     Date(Date),
     DateTime(DateTime),
 }
 
-impl FromStr for DateOrDateTime {
-    type Err = ParserError;
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input.parse::<DateTime>() {
-            Ok(dt) => return Ok(Self::DateTime(dt)),
-            Err(StrToDateTimeError::MissingT) => (/* fallthru */),
-            Err(StrToDateTimeError::Other(e)) => return Err(e),
+impl DateOrDateTime {
+    pub(crate) fn parse(input: &str) -> Result<(&str, Self)> {
+        let (input, date) = Date::parse(input)?;
+        if matches!(input.chars().next(), Some('T')) {
+            let (input, _) = tag("T")(input)?;
+            let (input, time) = Time::parse(input)?;
+            Ok((input, DateOrDateTime::DateTime(DateTime { date, time })))
+        } else {
+            Ok((input, DateOrDateTime::Date(date)))
         }
-        Ok(Self::Date(input.parse()?))
     }
 }
 
@@ -237,27 +242,33 @@ impl fmt::Display for DateOrDateTime {
     }
 }
 
+impl fmt::Debug for DateOrDateTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DateOrDateTime::Date(date) => fmt::Debug::fmt(date, f),
+            DateOrDateTime::DateTime(date_time) => fmt::Debug::fmt(date_time, f),
+        }
+    }
+}
+
 // Duration
 
+#[derive(Debug)]
 pub struct Duration {
     pub negative: bool,
     pub kind: DurationKind,
 }
 
-impl FromStr for Duration {
-    type Err = ParserError;
-
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
+impl Duration {
+    pub(crate) fn parse(input: &str) -> Result<(&str, Self)> {
         let (input, negative) = opt_sign_is_negative(input);
-        if let Some(input) = input.strip_prefix("P") {
-            let kind = input.parse()?;
-            Ok(Duration { negative, kind })
-        } else {
-            Err(ParserError::tag("P"))
-        }
+        let (input, _) = tag("P")(input)?;
+        let (input, kind) = DurationKind::parse(input)?;
+        Ok((input, Duration { negative, kind }))
     }
 }
 
+#[derive(Debug)]
 pub enum DurationKind {
     Weeks(u32),
     DateTime {
@@ -268,39 +279,86 @@ pub enum DurationKind {
     },
 }
 
-impl FromStr for DurationKind {
-    type Err = ParserError;
-
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        if let Some(input) = input.strip_suffix('W') {
-            // must be week form
-            return Ok(DurationKind::Weeks(input.parse()?));
+impl DurationKind {
+    fn parse(mut input: &str) -> Result<(&str, Self)> {
+        fn parse_mins_secs<'a>(
+            input: &'a str,
+            minutes: &mut u32,
+            seconds: &mut u32,
+        ) -> Result<&'a str> {
+            let Some((i, num)) = parse_u32(input)? else {
+                return Ok(input);
+            };
+            let Ok((i, _)) = tag("M")(i) else {
+                return Ok(input);
+            };
+            *minutes = num;
+            parse_secs(i, seconds)
         }
 
-        let (days, time) = input.split_once('T').unwrap_or((input, ""));
-        let days = if days.is_empty() { 0 } else { days.parse()? };
-        let (hours, time) = input.split_once('H').unwrap_or(("", time));
-        let hours = if hours.is_empty() { 0 } else { hours.parse()? };
-        let (minutes, seconds) = input.split_once('M').unwrap_or(("", time));
-        let minutes = if minutes.is_empty() {
-            0
-        } else {
-            minutes.parse()?
-        };
-        let seconds = if seconds.is_empty() {
-            0
-        } else {
-            let Some(seconds) = seconds.strip_suffix('S') else {
-                return Err(ParserError::expected("`S` suffix"));
+        fn parse_secs<'a>(input: &'a str, seconds: &mut u32) -> Result<&'a str> {
+            let Some((i, num)) = parse_u32(input)? else {
+                return Ok(input);
             };
-            seconds.parse()?
+            let Ok((i, _)) = tag("S")(i) else {
+                return Ok(input);
+            };
+            *seconds = num;
+            Ok(i)
+        }
+
+        let mut days = 0;
+        let mut hours = 0;
+        let mut minutes = 0;
+        let mut seconds = 0;
+
+        if !matches!(input.chars().next(), Some('T')) {
+            // there must be days
+            let Some((i, num)) = parse_u32(input)? else {
+                bail!("expected integer or `T`");
+            };
+            let mut iter = i.chars();
+            match iter.next() {
+                Some('W') => {
+                    return Ok((iter.as_str(), DurationKind::Weeks(num)));
+                }
+                Some('D') => {
+                    days = num;
+                    input = iter.as_str();
+                }
+                _ => bail!("expected `W` or `D`"),
+            }
+        }
+        let (input, _) = tag("T")(input)?;
+        let Some((mut input, num)) = parse_u32(input)? else {
+            bail!("expected integer");
         };
-        Ok(Self::DateTime {
-            days,
-            hours,
-            minutes,
-            seconds,
-        })
+        let mut iter = input.chars();
+        match iter.next() {
+            Some('H') => {
+                hours = num;
+                input = parse_mins_secs(iter.as_str(), &mut minutes, &mut seconds)?;
+            }
+            Some('M') => {
+                minutes = num;
+                input = parse_secs(iter.as_str(), &mut seconds)?;
+            }
+            Some('S') => {
+                seconds = num;
+                input = iter.as_str();
+            }
+            _ => bail!("expected one of `H`, `M`, `S`"),
+        }
+
+        Ok((
+            input,
+            DurationKind::DateTime {
+                days,
+                hours,
+                minutes,
+                seconds,
+            },
+        ))
     }
 }
 
@@ -319,19 +377,16 @@ pub enum Period {
     },
 }
 
-impl FromStr for Period {
-    type Err = ParserError;
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let Some((start, rest)) = input.split_once('/') else {
-            return Err(ParserError::expected("'/' in period"));
-        };
-        let start = start.parse()?;
-        Ok(if rest.starts_with('P') {
-            let duration = rest.parse()?;
-            Period::Start { start, duration }
+impl Period {
+    fn parse(input: &str) -> Result<(&str, Self)> {
+        let (input, start) = DateTime::parse(input)?;
+        let (input, _) = tag("/")(input)?;
+        Ok(if input.starts_with('P') {
+            let (input, duration) = Duration::parse(input)?;
+            (input, Period::Start { start, duration })
         } else {
-            let end = rest.parse()?;
-            Period::Explicit { start, end }
+            let (input, end) = DateTime::parse(input)?;
+            (input, Period::Explicit { start, end })
         })
     }
 }
@@ -401,7 +456,8 @@ fn split_once(test_ch: char, input: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Date, Recur, recur};
+
+    use super::{Date, DateTime, Recur, recur};
 
     #[test]
     fn format_date() {
@@ -410,7 +466,7 @@ mod tests {
             month: 2,
             day: 1,
         };
-        assert_eq!(date.to_string(), "0500-02-01");
+        assert_eq!(date.to_string(), "05000201");
     }
 
     #[test]
@@ -435,5 +491,28 @@ mod tests {
                 week_start: None
             }
         );
+    }
+
+    #[test]
+    fn date_time() {
+        let input = "20111217T152336Z";
+        let (input, parsed) = DateTime::parse(input).unwrap();
+        assert_eq!(
+            parsed,
+            super::DateTime {
+                date: super::Date {
+                    full_year: 2011,
+                    month: 12,
+                    day: 17,
+                },
+                time: super::Time {
+                    hour: 15,
+                    minute: 23,
+                    second: 36,
+                    utc: true
+                }
+            }
+        );
+        assert_eq!(input, "");
     }
 }

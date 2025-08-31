@@ -6,12 +6,12 @@ use core::fmt;
 use std::{borrow::Cow, error::Error as StdError};
 
 use anyhow::{anyhow, bail};
-use mediatype::MediaType;
 use oxilangtag::LanguageTag;
-use uriparse::URIError;
 
 use crate::{
-    parser::{Name, check_param_text},
+    Result,
+    parser::helpers::check_param_text,
+    types::{Name, VecOne},
     values::{CalendarUserAddress, Uri},
 };
 // NOTE: No double quotes in any param values. If the value contains
@@ -48,20 +48,22 @@ impl<E> From<E> for SingleParamError<E> {
     }
 }
 
+pub(crate) trait ParseParam<'src>: Sized {
+    const PARAM_NAME: Name<'static>;
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self>;
+}
+
 // ALTREP
 
+#[derive(Debug)]
 pub struct AlternativeTextRepresentation<'src>(pub Uri<'src>);
-impl<'src> AlternativeTextRepresentation<'src> {
-    pub const PARAM_NAME: &'static str = "ALTREP";
 
-    pub fn parse_value(
-        first_value: &'src str,
-        rest_values: &[&'src str],
-    ) -> Result<Self, SingleParamError<URIError>> {
-        if !rest_values.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(AlternativeTextRepresentation(Uri::try_from(first_value)?))
+impl<'src> ParseParam<'src> for AlternativeTextRepresentation<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("ALTREP");
+
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        Ok(AlternativeTextRepresentation(Uri::try_from(input)?))
     }
 }
 
@@ -73,11 +75,14 @@ impl fmt::Display for AlternativeTextRepresentation<'_> {
 
 // CN
 
-pub struct CommonName<'src>(pub &'src str);
-impl<'src> CommonName<'src> {
-    pub const PARAM_NAME: &'static str = "CN";
+#[derive(Debug)]
+pub(crate) struct CommonName<'src>(pub Cow<'src, str>);
 
-    pub fn parse_value(input: &'src str) -> anyhow::Result<Self> {
+impl<'src> ParseParam<'src> for CommonName<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("CN");
+
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
         Ok(Self(input))
     }
 }
@@ -96,7 +101,9 @@ impl fmt::Display for CommonName<'_> {
 
 // CUTYPE
 
+#[derive(Debug, Default)]
 pub enum CalendarUserType<'src> {
+    #[default]
     Individual,
     Group,
     Resource,
@@ -104,23 +111,18 @@ pub enum CalendarUserType<'src> {
     Unknown,
     Name(Name<'src>),
 }
-impl<'src> CalendarUserType<'src> {
-    pub const PARAM_NAME: &'static str = "CUTYPE";
+impl<'src> ParseParam<'src> for CalendarUserType<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("CUTYPE");
 
-    pub fn parse_value(
-        first_value: &'src str,
-        rest_values: &[&'src str],
-    ) -> Result<Self, SingleParamError<anyhow::Error>> {
-        if !rest_values.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(match first_value {
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        Ok(match &*input {
             "INDIVIDUAL" => Self::Individual,
             "GROUP" => Self::Group,
             "RESOURCE" => Self::Resource,
             "ROOM" => Self::Room,
             "UNKNOWN" => Self::Unknown,
-            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
+            _ => Self::Name(Name::parse(input)?),
         })
     }
 }
@@ -142,36 +144,28 @@ impl fmt::Display for CalendarUserType<'_> {
     }
 }
 
-impl<'src> Default for CalendarUserType<'src> {
-    fn default() -> Self {
-        // matches default in specification
-        Self::Individual
-    }
-}
-
 // DELEGATED-FROM
 
-pub struct Delegators<'src> {
-    pub first: CalendarUserAddress<'src>,
-    pub rest: Vec<CalendarUserAddress<'src>>,
-}
+pub(crate) struct Delegators<'src>(pub VecOne<CalendarUserAddress<'src>>);
 
-impl<'src> Delegators<'src> {
-    pub const PARAM_NAME: &'static str = "DELEGATED-FROM";
-    pub fn parse_value(first: &'src str, rest: &'_ [&'src str]) -> anyhow::Result<Self> {
-        let first = CalendarUserAddress::try_from(first)?;
-        let rest = rest
-            .iter()
-            .map(|val| CalendarUserAddress::try_from(*val))
+impl<'src> ParseParam<'src> for Delegators<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("DELEGATED-FROM");
+
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let first = CalendarUserAddress::try_from(input.first)?;
+        let rest = input
+            .rest
+            .into_iter()
+            .map(|val| CalendarUserAddress::try_from(val))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Delegators { first, rest })
+        Ok(Delegators(VecOne::from_parts(first, rest)))
     }
 }
 
 impl<'src> fmt::Display for Delegators<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}=\"{}\"", Self::PARAM_NAME, self.first)?;
-        for val in &self.rest {
+        write!(f, "{}=\"{}\"", Self::PARAM_NAME, self.0.first)?;
+        for val in &self.0.rest {
             write!(f, ",\"{}\"", val)?;
         }
         Ok(())
@@ -180,27 +174,22 @@ impl<'src> fmt::Display for Delegators<'src> {
 
 // DELEGATED-TO
 
-pub struct Delegatees<'src> {
-    pub first: CalendarUserAddress<'src>,
-    pub rest: Vec<CalendarUserAddress<'src>>,
-}
+pub(crate) struct Delegatees<'src>(pub VecOne<CalendarUserAddress<'src>>);
 
-impl<'src> Delegatees<'src> {
-    pub const PARAM_NAME: &'static str = "DELEGATED-TO";
-    pub fn parse_value(first: &'src str, rest: &'_ [&'src str]) -> anyhow::Result<Self> {
-        let first = CalendarUserAddress::try_from(first)?;
-        let rest = rest
-            .iter()
-            .map(|val| CalendarUserAddress::try_from(*val))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Delegatees { first, rest })
+impl<'src> ParseParam<'src> for Delegatees<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("DELEGATED-TO");
+
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        Ok(Delegatees(
+            input.map(|text| Ok(CalendarUserAddress::try_from(text)?))?,
+        ))
     }
 }
 
 impl<'src> fmt::Display for Delegatees<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}=\"{}\"", Self::PARAM_NAME, self.first)?;
-        for val in &self.rest {
+        write!(f, "{}=\"{}\"", Self::PARAM_NAME, self.0.first)?;
+        for val in &self.0.rest {
             write!(f, ",\"{}\"", val)?;
         }
         Ok(())
@@ -209,18 +198,15 @@ impl<'src> fmt::Display for Delegatees<'src> {
 
 // DIR
 
+#[derive(Debug)]
 pub struct DirectoryEntryReference<'src>(pub Uri<'src>);
 
-impl<'src> DirectoryEntryReference<'src> {
-    pub const PARAM_NAME: &'static str = "DIR";
-    pub fn parse_value(
-        first: &'src str,
-        rest: &'_ [&'src str],
-    ) -> Result<Self, SingleParamError<URIError>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(DirectoryEntryReference(Uri::try_from(first)?))
+impl<'src> ParseParam<'src> for DirectoryEntryReference<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("DIR");
+
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let value = input.get_single()?;
+        Ok(DirectoryEntryReference(Uri::try_from(value)?))
     }
 }
 
@@ -273,15 +259,14 @@ impl fmt::Display for Encoding {
 
 // FMTTYPE
 
-pub struct FormatType<'src>(mediatype::MediaType<'src>);
+#[derive(Debug)]
+pub struct FormatType<'src>(Name<'src>);
 
-impl<'src> FormatType<'src> {
-    pub const PARAM_NAME: &'static str = "FMTTYPE";
-    pub fn parse_value(first: &'src str, rest: &[&'src str]) -> anyhow::Result<Self> {
-        if !rest.is_empty() {
-            bail!("expected single mediatype");
-        }
-        Ok(FormatType(MediaType::parse(first)?))
+impl<'src> ParseParam<'src> for FormatType<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("FMTTYPE");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        Ok(FormatType(Name::parse(input)?))
     }
 }
 
@@ -332,18 +317,14 @@ impl<'src> fmt::Display for FreeBusyTimeType<'src> {
 
 // LANGUAGE
 
-pub struct Language<'src>(LanguageTag<&'src str>);
+#[derive(Debug)]
+pub struct Language<'src>(pub LanguageTag<Cow<'src, str>>);
 
-impl<'src> Language<'src> {
-    pub const PARAM_NAME: &'static str = "FMTTYPE";
-    pub fn parse_value(
-        first: &'src str,
-        rest: &[&'src str],
-    ) -> Result<Self, SingleParamError<oxilangtag::LanguageTagParseError>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(Language(LanguageTag::parse(first)?))
+impl<'src> ParseParam<'src> for Language<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("LANGUAGE");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let value = input.get_single()?;
+        Ok(Language(LanguageTag::parse(value)?))
     }
 }
 
@@ -355,27 +336,22 @@ impl<'src> fmt::Display for Language<'src> {
 
 // MEMBER
 
-pub struct GroupOrMemberList<'src> {
-    pub first: CalendarUserAddress<'src>,
-    pub rest: Vec<CalendarUserAddress<'src>>,
-}
+pub(crate) struct GroupOrListMember<'src>(pub VecOne<CalendarUserAddress<'src>>);
 
-impl<'src> GroupOrMemberList<'src> {
-    pub const PARAM_NAME: &'static str = "MEMBER";
-    pub fn parse_value(first: &'src str, rest: &'_ [&'src str]) -> anyhow::Result<Self> {
-        let first = CalendarUserAddress::try_from(first)?;
-        let rest = rest
-            .iter()
-            .map(|val| CalendarUserAddress::try_from(*val))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(GroupOrMemberList { first, rest })
+impl<'src> ParseParam<'src> for GroupOrListMember<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("MEMBER");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> anyhow::Result<Self> {
+        Ok(GroupOrListMember(
+            input.map(|v| Ok(CalendarUserAddress::try_from(v)?))?,
+        ))
     }
 }
 
-impl<'src> fmt::Display for GroupOrMemberList<'src> {
+impl<'src> fmt::Display for GroupOrListMember<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}=\"{}\"", Self::PARAM_NAME, self.first)?;
-        for val in &self.rest {
+        let (first, rest) = self.0.iter();
+        write!(f, "{}=\"{}\"", Self::PARAM_NAME, first)?;
+        for val in rest {
             write!(f, ",\"{}\"", val)?;
         }
         Ok(())
@@ -384,7 +360,12 @@ impl<'src> fmt::Display for GroupOrMemberList<'src> {
 
 // PARTSTAT
 
-// TODO these can be further subdivided if we want (for vevent, vtodo, and vjournal)
+/// Participation status
+///
+/// Expected one of 'needs-action', 'accepted', 'declined' or 'delegated' for event,
+/// any for todo, and one of 'needs-action', 'accepted', 'declined' for participant
+/// status, but any text that would be a valid [`Name`] is valid.
+#[derive(Debug)]
 pub enum ParticipationStatus<'src> {
     NeedsAction,
     Accepted,
@@ -396,16 +377,11 @@ pub enum ParticipationStatus<'src> {
     Name(Name<'src>),
 }
 
-impl<'src> ParticipationStatus<'src> {
-    pub const PARAM_NAME: &'static str = "PARTSTAT";
-    pub fn parse_value(
-        first: &'src str,
-        rest: &[&'src str],
-    ) -> Result<Self, SingleParamError<anyhow::Error>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(match first {
+impl<'src> ParseParam<'src> for ParticipationStatus<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("PARTSTAT");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        Ok(match &*input {
             "NEEDS-ACTION" => Self::NeedsAction,
             "ACCEPTED" => Self::Accepted,
             "DECLINED" => Self::Declined,
@@ -413,7 +389,7 @@ impl<'src> ParticipationStatus<'src> {
             "DELEGATED" => Self::Delegated,
             "COMPLETED" => Self::Completed,
             "IN-PROCESS" => Self::InProcess,
-            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
+            _ => Self::Name(Name::parse(input)?),
         })
     }
 }
@@ -442,33 +418,35 @@ impl<'src> fmt::Display for ParticipationStatus<'src> {
 
 // RANGE
 
-pub struct Range;
-
-impl Range {
-    pub const PARAM_NAME: &'static str = "RANGE";
-    pub fn parse_value(
-        first: &str,
-        rest: &[&str],
-    ) -> Result<Self, SingleParamError<anyhow::Error>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(match first {
-            "THISANDFUTURE" => Self,
-            other => return Err(anyhow!("expected THISANDFUTURE, found `{other}`").into()),
-        })
-    }
+#[derive(Debug)]
+pub enum Range {
+    ThisAndPrior,
+    ThisAndFuture,
 }
 
-impl Default for Range {
-    fn default() -> Self {
-        Self
+impl<'src> ParseParam<'src> for Range {
+    const PARAM_NAME: Name<'static> = Name::iana("RANGE");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        Ok(match &*input {
+            "THISANDPRIOR" => Self::ThisAndPrior,
+            "THISANDFUTURE" => Self::ThisAndFuture,
+            other => {
+                return Err(anyhow!(
+                    "expected one of THISANDPRIOR, THISANDFUTURE, found `{other}`"
+                ));
+            }
+        })
     }
 }
 
 impl fmt::Display for Range {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}=THISANDFUTURE", Self::PARAM_NAME)
+        let text = match self {
+            Self::ThisAndPrior => "THISANDPRIOR",
+            Self::ThisAndFuture => "THISANDFUTURE",
+        };
+        write!(f, "{}={text}", Self::PARAM_NAME)
     }
 }
 
@@ -564,6 +542,7 @@ impl<'src> fmt::Display for RelationshipType<'src> {
 
 /// Specifies the participation role for the calendar user specified
 /// by the property in the group schedule calendar component.
+#[derive(Debug)]
 pub enum ParticipationRole<'src> {
     /// Indicates the chair of the calendar entry
     Chair,
@@ -577,21 +556,16 @@ pub enum ParticipationRole<'src> {
     Name(Name<'src>),
 }
 
-impl<'src> ParticipationRole<'src> {
-    pub const PARAM_NAME: &'static str = "ROLE";
-    pub fn parse_value(
-        first: &'src str,
-        rest: &[&'src str],
-    ) -> Result<Self, SingleParamError<anyhow::Error>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(match first {
+impl<'src> ParseParam<'src> for ParticipationRole<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("ROLE");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        Ok(match &*input {
             "CHAIR" => Self::Chair,
             "REQ-PARTICIPANT" => Self::ReqParticipant,
             "OPT-PARTICIPANT" => Self::OptParticipant,
             "NON-PARTICIPANT" => Self::NonParticipant,
-            other => Self::Name(Name::parse(Cow::Borrowed(other))?),
+            _ => Self::Name(Name::parse(input)?),
         })
     }
 }
@@ -619,27 +593,25 @@ impl<'src> fmt::Display for ParticipationRole<'src> {
 
 /// To specify whether there is an expectation of a favor of a reply from the
 /// calendar user specified by the property value.
+#[derive(Debug)]
 pub enum RsvpExpectation {
     True,
     False,
 }
 
-impl RsvpExpectation {
-    pub const PARAM_NAME: &'static str = "RSVP";
-    pub fn parse_value(
-        first: &str,
-        rest: &[&str],
-    ) -> Result<Self, SingleParamError<anyhow::Error>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(match first {
+impl<'src> ParseParam<'src> for RsvpExpectation {
+    const PARAM_NAME: Name<'static> = Name::iana("RSVP");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        Ok(match &*input {
             "TRUE" => Self::True,
             "FALSE" => Self::False,
-            other => return Err(anyhow!("expected `TRUE` or `FALSE`, found {other}").into()),
+            other => return Err(anyhow!("expected `TRUE` or `FALSE`, found {other}")),
         })
     }
+}
 
+impl RsvpExpectation {
     pub fn as_str(&self) -> &'static str {
         match self {
             RsvpExpectation::True => "TRUE",
@@ -662,18 +634,15 @@ impl fmt::Display for RsvpExpectation {
 
 // SENT-BY
 
+#[derive(Debug)]
 pub struct SentBy<'src>(pub CalendarUserAddress<'src>);
 
-impl<'src> SentBy<'src> {
-    pub const PARAM_NAME: &'static str = "SENT-BY";
-    pub fn parse_value(
-        first: &'src str,
-        rest: &'_ [&'src str],
-    ) -> Result<Self, SingleParamError<URIError>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        Ok(SentBy(CalendarUserAddress::try_from(first)?))
+impl<'src> ParseParam<'src> for SentBy<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("SENT-BY");
+
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let value = input.get_single()?;
+        Ok(SentBy(value.try_into()?))
     }
 }
 
@@ -686,32 +655,37 @@ impl<'src> fmt::Display for SentBy<'src> {
 // TZID
 
 /// Timezone is not checked against database, just validated.
+#[derive(Debug)]
 pub struct TimeZoneIdentifier<'src> {
     prefix: bool,
-    value: &'src str,
+    value: Cow<'src, str>,
 }
 
-impl<'src> TimeZoneIdentifier<'src> {
-    pub const PARAM_NAME: &'static str = "SENT-BY";
-    pub fn parse_value(
-        first: &'src str,
-        rest: &'_ [&'src str],
-    ) -> Result<Self, SingleParamError<anyhow::Error>> {
-        if !rest.is_empty() {
-            return Err(SingleParamError::SingleParam);
-        }
-        let prefix = first.starts_with('/');
+impl<'src> ParseParam<'src> for TimeZoneIdentifier<'src> {
+    const PARAM_NAME: Name<'static> = Name::iana("SENT-BY");
+    fn parse_value(input: VecOne<Cow<'src, str>>) -> Result<Self> {
+        let input = input.get_single()?;
+        let prefix = input.starts_with('/');
         let value = if prefix {
             // Panic: first character is ASCII so 1 byte
-            check_param_text(&first[1..])?;
-            &first[1..]
+            check_param_text(&input[1..])?;
+
+            match input {
+                Cow::Borrowed(s) => Cow::Borrowed(&s[1..]),
+                Cow::Owned(mut s) => {
+                    s.remove(0);
+                    Cow::Owned(s)
+                }
+            }
         } else {
-            check_param_text(first)?;
-            first
+            check_param_text(&*input)?;
+            input
         };
         Ok(Self { prefix, value })
     }
+}
 
+impl<'src> TimeZoneIdentifier<'src> {
     pub fn fmt_value(&self) -> impl fmt::Display {
         struct FmtValue<'a>(&'a TimeZoneIdentifier<'a>);
         impl<'a> fmt::Display for FmtValue<'a> {

@@ -4,8 +4,11 @@ use anyhow::bail;
 
 use crate::{
     Result,
-    parser::ParserError,
-    types::{self, VecOne, opt_sign_is_negative},
+    parser::{
+        ParserError,
+        helpers::{_1or2_digit_int, _1to3_digit_int},
+    },
+    types::{self, DateOrDateTime, VecOne, opt_sign_is_negative},
 };
 
 use super::Recur;
@@ -50,8 +53,8 @@ pub enum End {
 }
 
 impl End {
-    fn parse_until(input: &str) -> Result<Self, ParserError> {
-        Ok(Self::Until(input.parse()?))
+    fn parse_until(input: &str) -> Result<Self> {
+        Ok(Self::Until(DateOrDateTime::parse(input)?.1))
     }
 
     fn parse_count(input: &str) -> Result<Self, ParserError> {
@@ -129,7 +132,7 @@ macro_rules! impl_comma_list {
 
         impl $name {
             pub fn parse(input: &str) -> Result<(&str, Self), ParserError> {
-                let (input, v) = VecOne::parse_comma_separated(input, $parser)?;
+                let (input, v) = VecOne::parse_comma_separated_borrowed(input, $parser)?;
                 Ok((input, Self(v)))
             }
         }
@@ -369,9 +372,9 @@ pub(crate) enum Param {
 }
 
 impl Param {
-    pub(crate) fn parse(input: &str) -> Result<Self, ParserError> {
+    pub(crate) fn parse(input: &str) -> Result<Self> {
         let Some((key, val)) = input.split_once('=') else {
-            return Err(ParserError::tag("="));
+            return Err(ParserError::tag("=").into());
         };
         Ok(match key {
             "UNTIL" => Param::End(End::parse_until(val)?),
@@ -387,75 +390,7 @@ impl Param {
             "BYMONTH" => Param::ByMonth(ByMonth::parse(val)?.1),
             "BYSETPOS" => Param::BySetPos(BySetPos::parse(val)?.1),
             "WKST" => Param::WeekStart(WeekStart::parse(val)?.1),
-            _ => return Err(ParserError::expected("RECUR param")),
+            _ => return Err(ParserError::expected("RECUR param").into()),
         })
-    }
-}
-
-// helpers
-
-fn take_while_m_n(
-    min: usize,
-    max: usize,
-    pred: impl Fn(char) -> bool,
-    input: &str,
-) -> Result<(&str, &str), ParserError> {
-    let mut chars = input.char_indices();
-
-    for _ in 0..min {
-        if !matches!(chars.next(), Some((_idx, v)) if pred(v)) {
-            return Err(ParserError::take_while_m_n(
-                min,
-                max,
-                "expected numeric digit",
-            ));
-        }
-    }
-    let mut rest = chars.as_str();
-    for _ in min..max {
-        if !matches!(chars.next(), Some((_idx, v)) if pred(v)) {
-            break;
-        };
-        rest = chars.as_str();
-    }
-    let first_len = input.len() - rest.len();
-    Ok((rest, &input[..first_len]))
-}
-
-/// 1 or 2 digit positive integer
-///
-/// min and max are inclusive
-fn _1or2_digit_int(
-    ty: &'static str,
-    min: u8,
-    max: u8,
-) -> impl for<'a> Fn(&'a str) -> Result<(&'a str, u8), ParserError> {
-    move |input| {
-        let (input, val) = take_while_m_n(1, 2, |ch: char| ch.is_ascii_digit(), input)?;
-        let val = val.parse()?;
-        if val < min || val > max {
-            Err(ParserError::out_of_range(ty, min, max, val))
-        } else {
-            Ok((input, val))
-        }
-    }
-}
-
-/// 1, 2, or 3 digit positive integer
-///
-/// min and max are inclusive
-fn _1to3_digit_int<'a>(
-    ty: &'static str,
-    min: u16,
-    max: u16,
-) -> impl Fn(&'a str) -> Result<(&'a str, u16), ParserError> {
-    move |input| {
-        let (input, val) = take_while_m_n(1, 3, |ch: char| ch.is_ascii_digit(), input)?;
-        let val = val.parse()?;
-        if val < min || val > max {
-            Err(ParserError::out_of_range(ty, min, max, val))
-        } else {
-            Ok((input, val))
-        }
     }
 }

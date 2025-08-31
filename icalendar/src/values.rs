@@ -5,9 +5,13 @@ use anyhow::bail;
 pub use base64::DecodeError;
 use base64::{display::Base64Display, prelude::*};
 use thiserror::Error;
+use uriparse::URI;
 pub use uriparse::URIError;
 
-use crate::types::{self, VecOne, time_hour, time_second};
+use crate::{
+    parser::helpers::tag,
+    types::{self, VecOne, time_hour, time_second},
+};
 
 // BINARY
 
@@ -57,11 +61,12 @@ pub struct BooleanError(String);
 
 // CAL-ADDRESS
 
+#[derive(Debug)]
 pub struct CalendarUserAddress<'src>(Uri<'src>);
 
-impl<'src> TryFrom<&'src str> for CalendarUserAddress<'src> {
+impl<'src> TryFrom<Cow<'src, str>> for CalendarUserAddress<'src> {
     type Error = URIError;
-    fn try_from(input: &'src str) -> Result<Self, Self::Error> {
+    fn try_from(input: Cow<'src, str>) -> Result<Self, Self::Error> {
         Ok(CalendarUserAddress(Uri::try_from(input)?))
     }
 }
@@ -82,12 +87,14 @@ pub struct Date {
 impl FromStr for Date {
     type Err = anyhow::Error;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let mut iter = input.split(',');
-        // Unwrap: `split` always produces at least 1 value
-        let first = iter.next().unwrap().parse()?;
-        let rest = iter
-            .map(|value| value.parse())
-            .collect::<Result<Vec<_>, _>>()?;
+        let (mut input, first) = types::Date::parse(input)?;
+        let mut rest = vec![];
+        while matches!(input.chars().next(), Some(',')) {
+            let (i, _) = tag(",")(input)?;
+            let (i, date) = types::Date::parse(i)?;
+            rest.push(date);
+            input = i;
+        }
         Ok(Self { first, rest })
     }
 }
@@ -103,7 +110,7 @@ impl fmt::Display for Date {
 }
 
 // DATE-TIME
-
+/*
 pub struct DateTime(pub VecOne<types::DateTime>);
 
 impl FromStr for DateTime {
@@ -118,9 +125,11 @@ impl FromStr for DateTime {
         Ok(Self(VecOne { first, rest }))
     }
 }
+    */
 
 // DURATION
 
+/*
 pub struct Duration(pub VecOne<types::Duration>);
 
 impl FromStr for Duration {
@@ -135,6 +144,7 @@ impl FromStr for Duration {
         Ok(Self(VecOne { first, rest }))
     }
 }
+    */
 
 // FLOAT
 
@@ -172,6 +182,7 @@ impl FromStr for Integer {
 
 // PERIOD
 
+/*
 pub struct Period(pub VecOne<types::Period>);
 
 impl FromStr for Period {
@@ -186,6 +197,7 @@ impl FromStr for Period {
         Ok(Self(VecOne { first, rest }))
     }
 }
+    */
 
 // RECUR
 
@@ -208,6 +220,16 @@ impl FromStr for Recur {
 
 #[derive(Debug, PartialEq)]
 pub struct Text<'src>(pub VecOne<Cow<'src, str>>);
+
+impl<'src> TryFrom<Cow<'src, str>> for Text<'src> {
+    type Error = anyhow::Error;
+    fn try_from(value: Cow<'src, str>) -> Result<Self, Self::Error> {
+        match value {
+            Cow::Borrowed(s) => Text::try_from(s),
+            Cow::Owned(s) => Text::try_from(s),
+        }
+    }
+}
 
 impl<'src> TryFrom<&'src str> for Text<'src> {
     type Error = anyhow::Error;
@@ -243,8 +265,41 @@ impl<'src> TryFrom<&'src str> for Text<'src> {
     }
 }
 
+impl TryFrom<String> for Text<'static> {
+    type Error = anyhow::Error;
+    fn try_from(input: String) -> Result<Text<'static>, Self::Error> {
+        let mut output = VecOne {
+            first: Cow::Owned("".into()),
+            rest: vec![],
+        };
+        let mut iter = input.chars().peekable();
+        while let Some(ch) = iter.next() {
+            match ch {
+                '\\' => match iter.peek().copied() {
+                    Some(ch2 @ '\\' | ch2 @ ',' | ch2 @ ';') => {
+                        iter.next();
+                        output.current().to_mut().push(ch2);
+                    }
+                    Some('N' | 'n') => {
+                        iter.next();
+                        output.current().to_mut().push('\n');
+                    }
+                    _ => bail!("unexpected character after escape ('\\')"),
+                },
+                ',' => {
+                    output.start_new();
+                }
+                ';' => bail!("semicolon should be escaped in text"),
+                _ => output.push_to_current(ch),
+            }
+        }
+        Ok(Self(output))
+    }
+}
+
 // TIME
 
+/*
 pub struct Time(pub VecOne<types::Time>);
 
 impl FromStr for Time {
@@ -259,15 +314,32 @@ impl FromStr for Time {
         Ok(Self(VecOne { first, rest }))
     }
 }
+    */
 
 // URI
 
 pub struct Uri<'src>(uriparse::URI<'src>);
 
+impl<'src> fmt::Debug for Uri<'src> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl<'src> TryFrom<&'src str> for Uri<'src> {
     type Error = URIError;
     fn try_from(input: &'src str) -> Result<Self, Self::Error> {
         Ok(Uri(input.try_into()?))
+    }
+}
+
+impl<'src> TryFrom<Cow<'src, str>> for Uri<'src> {
+    type Error = URIError;
+    fn try_from(input: Cow<'src, str>) -> Result<Self, Self::Error> {
+        match input {
+            Cow::Borrowed(input) => Ok(Uri(input.try_into()?)),
+            Cow::Owned(input) => Ok(Uri(URI::try_from(input.as_str())?.into_owned())),
+        }
     }
 }
 
