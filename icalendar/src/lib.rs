@@ -69,6 +69,7 @@ pub struct Event<'src> {
     pub categories: Vec<Categories<'src>>,
     pub comments: Vec<Comment<'src>>,
     pub contacts: Vec<Contact<'src>>,
+    pub exception_dates: Vec<ExceptionDateTimes<'src>>,
 }
 
 #[derive(Debug, Default)]
@@ -174,4 +175,10 @@ pub struct Contact<'src> {
     pub lang: Option<Language<'src>>,
     pub altrep: Option<AlternativeTextRepresentation<'src>>,
     pub value: Cow<'src, str>,
+}
+
+#[derive(Debug)]
+pub struct ExceptionDateTimes<'src> {
+    pub timezone_id: Option<TimeZoneIdentifier<'src>>,
+    pub values: VecOne<DateOrDateTime>,
 }

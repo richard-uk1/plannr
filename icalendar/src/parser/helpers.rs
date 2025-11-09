@@ -355,13 +355,25 @@ pub fn parse_date_or_datetime_list(input: &mut Line<'_>) -> Result<VecOne<DateOr
         .transpose()?
         .unwrap_or(true);
 
-    todo!();
+    let input = &*input.value;
     Ok(if is_datetime {
-        let (_, datetime) = DateTime::parse(&*input.value)?;
-        VecOne::new(DateOrDateTime::DateTime(datetime))
+        let (mut input, datetime) = DateTime::parse(input)?;
+        let mut output = VecOne::new(DateOrDateTime::DateTime(datetime));
+        while let Ok((i, _)) = tag(",")(input) {
+            let (i, date) = DateTime::parse(i)?;
+            input = i;
+            output.push(DateOrDateTime::DateTime(date));
+        }
+        output
     } else {
-        let (_, date) = Date::parse(&*input.value)?;
-        VecOne::new(DateOrDateTime::Date(date))
+        let (mut input, date) = Date::parse(input)?;
+        let mut output = VecOne::new(DateOrDateTime::Date(date));
+        while let Ok((i, _)) = tag(",")(input) {
+            let (i, date) = Date::parse(i)?;
+            input = i;
+            output.push(DateOrDateTime::Date(date));
+        }
+        output
     })
 }
 

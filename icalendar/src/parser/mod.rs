@@ -19,12 +19,15 @@ pub(crate) use param_map::ParamMap;
 
 use crate::{
     AnnotatedText, Attachment, Attendee, CalScale, Calendar, Categories, Class, Comment, Contact,
-    Event, EventEnd, EventStatus, Organizer, RecurrenceId, Result, TimeTransparency,
+    Event, EventEnd, EventStatus, ExceptionDateTimes, Organizer, RecurrenceId, Result,
+    TimeTransparency,
     params::{
         CommonName, Delegatees, Delegators, DirectoryEntryReference, GroupOrListMember, Language,
         SentBy,
     },
-    parser::helpers::{check_iana_token, opt_vec_one_to_vec, parse_date_or_datetime},
+    parser::helpers::{
+        check_iana_token, opt_vec_one_to_vec, parse_date_or_datetime, parse_date_or_datetime_list,
+    },
     types::{Data, DateOrDateTime, DateTime, Duration, GeoLocation, Name, Priority},
     values::Text,
 };
@@ -152,6 +155,8 @@ impl<'src> Event<'src> {
                 builder.comments.push(parse_comment(next)?);
             } else if &next.name == "CONTACT" {
                 builder.contacts.push(parse_contact(next)?);
+            } else if &next.name == "EXDATE" {
+                builder.exception_dates.push(parse_exception_dates(next)?);
             } else if &next.name == "BEGIN" {
                 // skip all other subtrees
                 parser.skip_current()?;
@@ -361,6 +366,15 @@ fn parse_contact<'src>(mut input: Line<'src>) -> Result<Contact<'src>> {
     })
 }
 
+fn parse_exception_dates<'src>(mut input: Line<'src>) -> Result<ExceptionDateTimes<'src>> {
+    let timezone_id = input.params.take_ty()?;
+    let values = parse_date_or_datetime_list(&mut input)?;
+    Ok(ExceptionDateTimes {
+        timezone_id,
+        values,
+    })
+}
+
 struct CalendarBuilder<'src> {
     prod_id: Option<Cow<'src, str>>,
     version_set: bool,
@@ -428,6 +442,7 @@ pub struct EventBuilder<'src> {
     categories: Vec<Categories<'src>>,
     comments: Vec<Comment<'src>>,
     contacts: Vec<Contact<'src>>,
+    exception_dates: Vec<ExceptionDateTimes<'src>>,
 }
 
 impl<'src> EventBuilder<'src> {
@@ -510,6 +525,7 @@ impl<'src> EventBuilder<'src> {
             categories: self.categories,
             comments: self.comments,
             contacts: self.contacts,
+            exception_dates: self.exception_dates,
         })
     }
 }
